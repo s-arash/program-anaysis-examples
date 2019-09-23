@@ -2,24 +2,52 @@
 
 ;; Predicates for CESK*
 
-(define (expr? e)
+(define (proto-expr? expr? e)
   (match e
     [(? symbol?) #t]
     [`(,(? expr?) ,(? expr?)) #t]
     [`(lambda (,x) ,(? expr?)) #t]
     [`(if ,(? expr?) ,(? expr?) ,(? expr?)) #t]
     [`(set! ,(? symbol?) ,(? expr?)) #t]
-    [(? lit?) #t]
-    [(? builtin?) #t]
+    [(? const?) #t]
+    [(? const?) #t]
+    [else #f]))
+
+;;it's not just theory!
+(define (Y f) (λ (x) (f (Y f) x)))
+
+(define expr? (Y proto-expr?))
+
+(define (proto-sugared-expr? expr? e)
+  (match e
+    [(? ((curry proto-expr?) expr?)) #t]
+    [`(let* ([,(? symbol? xs) ,(? expr? xes)]...) ,(? expr? e)) #t]
+    [else #f]))
+
+(define sugared-expr? (Y proto-sugared-expr?))
+
+(define (desugar e)
+  (match e
+    [(? symbol? sym) sym]
+    [`(,(? sugared-expr? f) ,(? sugared-expr? arg)) `(,(desugar f) ,(desugar arg))]
+    [`(lambda (,x) ,(? sugared-expr? e)) `(lambda (,x) ,(desugar e))]
+    [`(if ,(? sugared-expr? cond-e) ,(? sugared-expr? then-e) ,(? sugared-expr? else-e)) `(if ,(desugar cond-e) ,(desugar then-e) ,(desugar else-e))]
+    [`(set! ,(? symbol? x) ,(? sugared-expr? e)) `(set! ,x ,(desugar e))]
+    [(? const? c) c]
+    [(? builtin? builtin) builtin]
+    [`(let* ([,(? symbol? xs) ,(? sugared-expr? xes)]...) ,(? sugared-expr? e))
+     (foldr (λ (x xe e) `((lambda (,x) ,e) ,(desugar xe))) (desugar e) xs xes)]
     [else #f]))
 
 (define addr? number?)
-(define (lit? x) (boolean? x))
 (define (builtin? x) (hash-ref builtins x #f))
+(define const? (or/c boolean? number? builtin?))
 (define builtins (hash
                   'add1 add1
+                  'sub1 sub1
                   'not not
-                  'zero? zero?))
+                  'zero? zero?
+                  'call/cc 'call/cc))
 
 (define (env? e)
   (and (andmap (lambda (key) (symbol? key)) (hash-keys e))
@@ -31,12 +59,14 @@
     [`(ar ,(? expr? arg) ,(? env? env) ,(? addr? k)) #t]
     [`(fn (lambda (,x) ,(? expr?)) ,(? env?) ,(? addr? k)) #t]
     [`(if ,(? expr? then) ,(? expr? else) ,(? env? env) ,(? addr? k)) #t]
-    [`(set ,(? addr? addr) ,(? addr? k)) #t]))
+    [`(set ,(? addr? addr) ,(? addr? k)) #t]
+    [else #f]))
 
 (define (storable? v)
   (match v
     [`(clo (lambda (,x) ,(? expr?)) ,(? env?)) #t]
     [`(lit ,x) #t]
+    ['(builtin ,x) #t]
     [(? kont?) #t]))
 
 (define (store? e)
@@ -47,6 +77,9 @@
   (match state
     [`(,(? expr?) ,(? env?) ,(? store?) ,(? addr?)) #t]
     [else #f]))
+
+(define (apply-builtin builtin v)
+  ((hash-ref builtins builtin) v))
 
 ;;
 ;; Store handling
@@ -63,18 +96,26 @@
   (let ([a0 (fresh-addr)])
     `(,e ,(hash) ,(hash a0 'mt) ,a0)))
 
+(define (val->storable v ρ σ)
+  (match v
+    [(? const?) `(const ,v)]
+    [`(<--kont--> ,a) (hash-ref σ a)]
+    [else `(clo ,v ,ρ)]))
+
 ;; Step relation
 (define (step state)
   (match state
     ;; Variable lookup
-    [`(,(? symbol? x) ,ρ ,σ ,a) 
+    [`(,(? (and/c symbol? (not/c const?)) x) ,ρ ,σ ,a) 
      (match (hash-ref σ (hash-ref ρ x))
+       ;; when your brain gives up ...
+       [(? kont?) `((<--kont--> ,(hash-ref ρ x)) ,ρ ,σ ,a)]
        [`(clo (lambda (,x) ,body) ,ρ1)
         `((lambda (,x) ,body) ,ρ1 ,σ ,a)]
-       [`(lit ,v)
+       [`(const ,v)
         `(,v (hash) ,σ ,a)])]
     ;; Application
-    [`((,e0 ,e1) ,ρ ,σ ,a)
+    [`((,e0 ,e1) ,ρ ,σ ,a) #:when (not (eq? e0 '<--kont-->))
      (let* ([b (fresh-addr)]
             [new-k `(ar ,e1 ,ρ ,a)]
             [new-σ (hash-set σ b new-k)])
@@ -89,7 +130,7 @@
      (let ([b (fresh-addr)]
            [new-kont `(set ,(hash-ref ρ x) ,a)])
            `(,e ,ρ ,(hash-set σ b new-kont) ,b))]
-    ;; Lambdas and literals...
+    ;; Lambdas and constants...
     [`(,v ,ρ ,σ ,a)
      (let ([k (hash-ref σ a)]
            [b (fresh-addr)])
@@ -97,25 +138,31 @@
          [`(ar ,e ,ρ1 ,c)
           `(,e ,ρ1 ,(hash-set σ b `(fn ,v ,ρ ,c)) ,b)]
          [`(fn (lambda (,x) ,e) ,ρ1 ,c)
-          `(,e ,(hash-set ρ1 x b) ,(hash-set σ b (if (lit? v) `(lit ,v) `(clo ,v ,ρ))) ,c)]
-         #;[`(fn (? builtin? builtin) ,ρ1 ,c)
+          `(,e ,(hash-set ρ1 x b) ,(hash-set σ b (val->storable v ρ σ)) ,c)]
+         [`(fn (<--kont--> ,a1) ,ρ1 ,c)
+          `(,v ,ρ ,σ ,a1)]
+         [`(fn call/cc ,ρ1 ,c)
+          (match v
+            [`(lambda (,k) ,e) `(,e ,(hash-set ρ k c) ,σ ,c)])]
+         [`(fn ,(? builtin? builtin) ,ρ1 ,c)
           `(,(apply-builtin builtin v) ,ρ ,σ ,c)]
          [`(if ,(? expr? then) ,(? expr? else) ,(? env? ρ) ,(? addr? a))
           (let ([cond-eval (if v #t #f)])  
           `(,(if cond-eval then else) ,ρ ,σ ,a))]
          [`(set ,(? addr? addr) ,(? addr? a))
            (match (hash-ref σ addr)
-             [`(clo ,e ,ρ1) `(,e ,ρ1     ,(hash-set σ addr (if (lit? v) `(lit ,v) `(clo ,v ,ρ))) ,a)]
-             [`(lit ,l)     `(,l ,(hash) ,(hash-set σ addr (if (lit? v) `(lit ,v) `(clo ,v ,ρ))) ,a)])]
+             [`(clo ,e ,ρ1)   `(,e ,ρ1     ,(hash-set σ addr (val->storable v ρ σ)) ,a)]
+             [`(const ,l)     `(,l ,(hash) ,(hash-set σ addr (val->storable v ρ σ)) ,a)]
+             [(? kont?)       `((<--kont--> addr) (hash) ,(hash-set σ addr (val->storable v ρ σ)) ,a)])]
          [else state]))]))
 
 (define (iterate state)
-  (displayln "Iterating state...")
-  (pretty-print state)
+  ;(displayln "Iterating state...")
+  ;(pretty-print state)
   (let ([next-state (step state)])
     (if (equal? next-state state)
         ;; Done
-        (displayln "Done w/ evaluation.")
+        (displayln (format "Done w/ evaluation. value: ~a" (car state)))
         (iterate next-state))))
 
 (define (repl)
@@ -123,27 +170,48 @@
   (display "> ")
   (let ([input (read)])
     ;; Execute the expression
-    (iterate (inject input))
+    (iterate (inject (desugar input)))
     (repl)))
 
 (repl)
 
+
 ;; Examples
 (define id-id '((lambda (x) x) (lambda (x) x)))
 (define omega '((lambda (x) (x x)) (lambda (x) (x x))))
-
-;(if #f (lambda (x) (x x)) (lambda (x) x))
-;(if #f ((lambda (x) (x x)) (lambda (x) (x x))) (lambda (x) x))
-;((lambda (x) x) #f)
-
 ;; This should not terminate
-#;(let ([f #f])
-  (let ([dummy (set! f (lambda (x) (f x)))])
-      (f #f)))
-
+(define sugared-example
+  '(let* ([f #f]
+          [dummy (set! f (lambda (x) (f x)))])
+     (f #f)))
+; desugared:
 #;((lambda (f)
    ((lambda (dummy) (f #f))
     (set! f (lambda (x) (f x)))))
  #f) 
+(define sugared-example-2 '(let* ([id (lambda (x) x)]) (id #t)))
+(define sugared-example-3 '((lambda (x) (let* ([res #f]) res)) #t))
+(define example-4 (let* ([counter 0]
+                         [count-down #t]
+                         [dummy (set! count-down (lambda (x) (if (zero? x) x (let* ([dummy3 (set! counter (add1 counter))]) (count-down (sub1 x))))))]
+                         [dummy2 (count-down 5)]
+                         [dummy3 (count-down 6)])
+                    counter))
+(define example-5 (let* ([foo (call/cc (lambda (k) (let* ([dummy (k 6)]) 7)))])
+                    foo))
+(define example-6
+  (let* ([lbl (lambda (x) (call/cc (lambda (x) x)))]
+         [goto (lambda (lbl) (lbl lbl))]
+         [f (lambda (n)
+              (let* ([i n]
+                     [res 0]
+                     [start (lbl #f)]
+                     [dummy (set! res (add1 (add1 res)))]
+                     [dummy2 (set! i (sub1 i))]
+                     [dummy3 (if (zero? i) #f (goto start))])
+                res))])
+         (f 10)))
+
+
 
   
