@@ -57,17 +57,17 @@
   (match k
     ['mt #t]
     [`(ar ,(? expr? arg) ,(? env? env) ,(? addr? k)) #t]
-    [`(fn (lambda (,x) ,(? expr?)) ,(? env?) ,(? addr? k)) #t]
+    [`(fn ,f ,(? env?) ,(? addr? k)) #t]
     [`(if ,(? expr? then) ,(? expr? else) ,(? env? env) ,(? addr? k)) #t]
     [`(set ,(? addr? addr) ,(? addr? k)) #t]
     [else #f]))
 
 (define (storable? v)
   (match v
-    [`(clo (lambda (,x) ,(? expr?)) ,(? env?)) #t]
-    [`(lit ,x) #t]
-    ['(builtin ,x) #t]
-    [(? kont?) #t]))
+    [`(clo (lambda (,(? symbol?)) ,(? expr?)) ,(? env?)) #t]
+    ['(const ,(? const?)) #t]
+    [(? kont?) #t]
+    [else #f]))
 
 (define (store? e)
   (and (andmap addr? (hash-keys e))
@@ -143,7 +143,11 @@
           `(,v ,ρ ,σ ,a1)]
          [`(fn call/cc ,ρ1 ,c)
           (match v
-            [`(lambda (,k) ,e) `(,e ,(hash-set ρ k c) ,σ ,c)])]
+            [`(lambda (,k) ,e) `(,e ,(hash-set ρ k c) ,σ ,c)]
+            #;[`(<--kont--> ,k-a) `((lambda (x) (,v x)) ,ρ ,σ ,a)] ;η-exapnsion
+            [`(<--kont--> ,k-a) `((<--kont--> ,a) ,ρ ,σ ,k-a)] ; from paper
+            #;[`(<--kont--> ,k-a) `((<--kont--> ,c) ,ρ ,σ ,k-a)] ; what I think is right
+            )]
          [`(fn ,(? builtin? builtin) ,ρ1 ,c)
           `(,(apply-builtin builtin v) ,ρ ,σ ,c)]
          [`(if ,(? expr? then) ,(? expr? else) ,(? env? ρ) ,(? addr? a))
@@ -191,18 +195,19 @@
  #f) 
 (define sugared-example-2 '(let* ([id (lambda (x) x)]) (id #t)))
 (define sugared-example-3 '((lambda (x) (let* ([res #f]) res)) #t))
-(define example-4 (let* ([counter 0]
-                         [count-down #t]
-                         [dummy (set! count-down (lambda (x) (if (zero? x) x (let* ([dummy3 (set! counter (add1 counter))]) (count-down (sub1 x))))))]
-                         [dummy2 (count-down 5)]
-                         [dummy3 (count-down 6)])
-                    counter))
+(define example-4
+  (let* ([counter 0]
+         [count-down #t]
+         [dummy (set! count-down (lambda (x) (if (zero? x) x (let* ([dummy3 (set! counter (add1 counter))]) (count-down (sub1 x))))))]
+         [dummy2 (count-down 5)]
+         [dummy3 (count-down 6)])
+    counter))
 (define example-5 (let* ([foo (call/cc (lambda (k) (let* ([dummy (k 6)]) 7)))])
                     foo))
 (define example-6
-  (let* ([lbl (lambda (x) (call/cc (lambda (x) x)))]
+  (let* ([lbl (lambda (x) (call/cc (lambda (k) (k k))))]
          [goto (lambda (lbl) (lbl lbl))]
-         [f (lambda (n)
+         [double (lambda (n)
               (let* ([i n]
                      [res 0]
                      [start (lbl #f)]
@@ -210,8 +215,19 @@
                      [dummy2 (set! i (sub1 i))]
                      [dummy3 (if (zero? i) #f (goto start))])
                 res))])
-         (f 10)))
+         (double 10)))
+
+(define exmaple-7
+  (let* ([i 0]
+         [lbl1 (call/cc (lambda (k) k))]
+         [dummy (set! i (add1 i))]
+         [where-will-it-go (call/cc lbl1)]
+         [dummy4 (call/cc where-will-it-go)]
+         ) 
+  i))
+
+
+(define example-8 ((call/cc (lambda (k) (+ 1 (call/cc k)))) 5))
 
 
 
-  
