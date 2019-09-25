@@ -11,7 +11,7 @@
     [`(lambda (,x) ,(? expr?)) #t]
     [else #f]))
 
-(define addr? number?)
+(define addr? (λ (a) #t))
 
 (define time? number?)
 
@@ -46,15 +46,22 @@
     [else #f]))
 
 (define (tick state kont)
-  (match state [`(,expr ,env ,store ,kont ,time) (remainder (+ time 1) 6)]))
+  (match state [`(,expr ,env ,store ,kont ,time) (remainder (+ time 1) 1)]))
+
+(define (tick-0cfa state kont) 'nothing)
 
 (define (alloc state kont)
   (match state [`(,expr ,env ,store ,kont ,time) time]))
 
+;; Value allocator for 0CFA
+(define (alloc-v-0cfa x) x)
+
+;; Continuation allocator for 0CFA
+(define (alloc-k state) (match state [`(,expr ,env ,store ,kont ,time) expr]))
 
 ;; Create a CESK* state from e
 (define (inject e)
-  `(,e ,(hash) ,(hash 0 (set 'mt)) 0 1))
+  `(,e ,(hash) ,(hash 0 (set 'mt)) 0 'nothing))
 
 ;; Examples
 (define id-id '((lambda (x) x) (lambda (x) x)))
@@ -80,26 +87,27 @@
           (stream-map 
             (lambda (k) (match val
                 [`(clo ,v ,ρ1)
-                 `(,v ,ρ1 ,σ ,a ,(tick state k))]))
+                 `(,v ,ρ1 ,σ ,a nothing #;,(tick state k))]))
             (store-ref-kont σ a)))   
         (store-ref-val σ (hash-ref ρ x)))]
     ;; Application
     [`((,e0 ,e1) ,ρ ,σ ,a ,t)
     (stream-map (lambda (k)
-     (let* ([b (alloc state k)]
+     (let* ([b (alloc-k state)]
             [new-k `(ar ,e1 ,ρ ,a)]
             [new-σ (store-set σ b new-k)])
-       `(,e0 ,ρ ,new-σ ,b ,(tick state k))))
+       `(,e0 ,ρ ,new-σ ,b nothing #;,(tick state k))))
     (store-ref-kont σ a))]
     ;; Lambdas...
     [`(,v ,ρ ,σ ,a ,t)
       (stream-flatmap (lambda (k)
-        (let ([b (alloc state k)])
+        (let ([b-k (alloc-k state)])
           (match k
             [`(ar ,e ,ρ1 ,c)
-              (stream `(,e ,ρ1 ,(store-set σ b `(fn ,v ,ρ ,c)) ,b ,(tick state k)))]
+              (stream `(,e ,ρ1 ,(store-set σ b-k `(fn ,v ,ρ ,c)) ,b-k nothing #;,(tick state k)))]
             [`(fn (lambda (,x) ,e) ,ρ1 ,c)
-              (stream `(,e ,(hash-set ρ1 x b) ,(store-set σ b `(clo ,v ,ρ)) ,c ,(tick state k)))]
+             (let ([b-v (alloc-v-0cfa x)])
+               (stream `(,e ,(hash-set ρ1 x b-v) ,(store-set σ b-v `(clo ,v ,ρ)) ,c nothing)))]
             [else empty-stream])))
         (store-ref-kont σ a))]))
 
@@ -112,6 +120,42 @@
         (displayln "Done w/ evaluation.")
         (iterate (car next-state)))))
 
+;; Fine all states reachable from state, generate a graph whose root
+;; is state.
+(define (gen-graph state)
+  ;; h is a hash from states -> set of states
+  ;; Idea: each iteration, we map the step function over the keys of `h` and add any newly-discovered states
+  (define (iterate-hash h)
+    (let* ([next-states (map (lambda (state) (cons state (list->set (stream->list (step state))))) (hash-keys h))]
+           [next-graph 
+            (foldl
+             (match-lambda** [((cons state next-states) h)
+                              (let* ([graph-after-connecting (hash-set h state (set-union (hash-ref h state) next-states))]
+                                     [graph-after-adding-states
+                                      (foldl (lambda (next-state h)
+                                               (if (hash-has-key? h next-state) h (hash-set h next-state (set))))
+                                             graph-after-connecting
+                                             (set->list next-states))])
+                                graph-after-adding-states)])
+             h
+             next-states)])
+      (if (equal? next-graph h)
+          ;; No more 
+          h
+          ;; Otherwise, keep going...
+          (iterate-hash next-graph))))
+  (iterate-hash (hash state (set))))
+
+;; Convert a hash of the type e -> set(e) into a DOT digraph
+(define (graphify h)
+  (define lines
+    (flatten (hash-map h (lambda (key value) (map (lambda (v) (format "\"~a\" -> \"~a\"" key v)) (set->list value))))))
+  (displayln "digraph {")
+  (for ([line lines]);
+    (displayln (format "  ~a" line)))
+  (displayln "}"))
+
+;; Finds all states reachable from state?
 (define (reachable state)
   (define ind 0)
   (define known-states (mutable-set state))
@@ -144,6 +188,18 @@
   (let ([input (read)])
     ;; Execute the expression
     (pretty-print (set-count (reachable (inject input))))
+    ;(pretty-print (gen-graph (inject input)))
+    (graphify (gen-graph (inject input)))
     (repl)))
 
 (repl)
+
+(stream->list (step `(x #hash((x . x))
+    #hash(
+          (0 . ,(set 'mt))
+          ((x x) . ,(set '(ar x #hash((x . x)) 0)))
+          ((lambda (x) (x x)) . ,(set '(fn (lambda (x) (x x)) #hash() 0)))
+          (((lambda (x) (x x)) (lambda (x) (x x))) . ,(set '(ar (lambda (x) (x x)) #hash() 0)))
+          (x . ,(set '(clo (lambda (x) (x x)) #hash()))))
+    (x x)
+    nothing)))
