@@ -21,6 +21,7 @@
 (define (proto-sugared-expr? expr? e)
   (match e
     [(? ((curry proto-expr?) expr?)) #t]
+    [`(λ (,x) ,(? expr? e)) #t]
     [`(let* ([,(? symbol? xs) ,(? expr? xes)]...) ,(? expr? e)) #t]
     [else #f]))
 
@@ -31,6 +32,7 @@
     [(? symbol? sym) sym]
     [`(,(? sugared-expr? f) ,(? sugared-expr? arg)) `(,(desugar f) ,(desugar arg))]
     [`(lambda (,x) ,(? sugared-expr? e)) `(lambda (,x) ,(desugar e))]
+    [`(λ (,x) ,(? sugared-expr? e)) `(lambda (,x) ,(desugar e))]
     [`(if ,(? sugared-expr? cond-e) ,(? sugared-expr? then-e) ,(? sugared-expr? else-e)) `(if ,(desugar cond-e) ,(desugar then-e) ,(desugar else-e))]
     [`(set! ,(? symbol? x) ,(? sugared-expr? e)) `(set! ,x ,(desugar e))]
     [(? const? c) c]
@@ -71,6 +73,7 @@
     [`(set! ,x-t ,e-t) `(set! ,(untag x-t) ,(untag e-t))]
     [(? const? c) c]
     [else 'BAD-INPUT]))
+
 (define (tagged-expr? et)
   (define (helper e)
     (match e
@@ -121,11 +124,26 @@
     [`(,expr ,(? env?) ,(? store?) ,(? addr?) ,(? time?)) #t]
     [else #f]))
 
+(define (addr? a)
+  (match a
+    ;[x #t] ; TODO REMOVE
+    [`(,x . ,δ) (and (or (symbol? x) (number? x))
+                    (andmap number? δ))]
+    [else #f]))
+
+(define (time? t)
+  (match t
+    ;[x #t] ; TODO REMOVE
+    [`(,l . ,δ) (and (andmap number? δ)
+                     (or (number? l) (equal? l '•)))]
+    [else #f]))
+
 (define (take-at-most l n)
   (if (<= (length l) n) l (take l n)))
 
-(define k-cfa-k 1)
+(define k-cfa-k 0)
 
+; The paper's definition
 (define (tick state kont)
   (let ([res (match state
     [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) t]
@@ -135,36 +153,39 @@
     [`((,v . ,_) ,ρ ,σ ,a (,l . ,δ))
      (match kont
        [`(ar ,e ,ρ1 ,c) `(,l . ,δ)]
-       [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c) (cons '• (take-at-most (cons l δ) k-cfa-k))]
-       [`(fn ((<--kont--> ,a1) . ,l1) ,ρ1 ,c) (cons '• (take-at-most (cons l δ) k-cfa-k))]
-       [`(fn (call/cc . ,l1) ,ρ1 ,c) (cons '• (take-at-most (cons l δ) k-cfa-k))]
-       [`(fn (,(? builtin? builtin) . ,l1) ,ρ1 ,c) (cons '• (take-at-most (cons l δ) k-cfa-k))]
+       [`(fn (,fn . ,l1) ,ρ1 ,c)      (cons '• (take-at-most (cons l δ) k-cfa-k))]
+       
        [`(if ,then ,else ,(? env? ρ) ,(? addr? a)) `(,l . ,δ)]
        [`(set ,(? addr? addr) ,(? addr? a)) `(,l . ,δ)]
        ['mt `(,l . ,δ)])])])
     (when (not (time? res)) (error (format "not a valid time: ~v \nstate: ~v \nkont:~a" res state kont)))
     res))
-
-(define (addr? a)
-  (match a
-    [x #t] ; TODO REMOVE
-    [`(,x . ,δ) (and (or (symbol? x) (number? x))
-                    (andmap number? δ))]
-    [else #f]))
-
-(define (time? t)
-  (match t
-    [x #t] ; TODO REMOVE
-    [`(,l . ,δ) (and (andmap number? δ)
-                     (or (number? l) (equal? l '•)))]
-    [else #f]))
+; My hackery...
+#;(define (tick state kont)
+  (let ([res (match state
+    [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) t]
+    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t) #:when (not (eq? e0 '<--kont-->)) (take-at-most (cons l t) k-cfa-k)]
+    [`(((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a ,t) (take-at-most (cons l t) k-cfa-k)]
+    [`(((set! ,x ,e) . ,l) ,ρ ,σ ,a ,t) t]
+    [`((,v . ,_) ,ρ ,σ ,a ,t)
+     (match kont
+       [`(ar (,e . ,l1) ,ρ1 ,c) (take-at-most (cons l1 t) k-cfa-k)]
+       [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c)      (take-at-most (cons l1 t) k-cfa-k)]
+       [`(fn ((<--kont--> ,a1) . ,l1) ,ρ1 ,c)      (take-at-most (cons l1 t) k-cfa-k)]
+       [`(fn (call/cc . ,l1) ,ρ1 ,c)               (take-at-most (cons l1 t) k-cfa-k)]
+       [`(fn (,(? builtin? builtin) . ,l1) ,ρ1 ,c) (take-at-most (cons l1 t) k-cfa-k)]
+       [`(if ,then ,else ,(? env? ρ) ,(? addr? a)) t]
+       [`(set ,(? addr? addr) ,(? addr? a)) t]
+       ['mt t])])])
+    (when (not (time? res)) (error (format "not a valid time: ~v \nstate: ~v \nkont:~a" res state kont)))
+    res))
 
 ;; allocator for k-CFA
 (define (alloc state kont)
   (match state
     [`((((,e0 . ,l) ,e1) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) #:when (not (eq? e0 '<--kont-->)) (cons l δ)]
     [`(((if (,e-cond . ,e-cond-l) ,e-then ,e-else) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons l1 δ)]
-    [`((,v . ,l) ,ρ ,σ ,a (,_ . ,δ))
+    [`((,v . ,l) ,ρ ,σ ,a (,_ . ,δ)) #:when (val->storable `(,v . ,l) ρ σ)
      (match kont
        [`(ar (,e . ,l1) ,ρ1 ,c) (cons l1 δ)]
        [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c) (cons x δ)]
@@ -218,7 +239,7 @@
          [`(const ,v)
           `(,v (hash) ,σ ,a ,(tick state k))]))]
     ;; Application
-    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t) #:when (not (eq? (car e0) '<--kont-->))
+    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t) #:when (not (eq? e0 '<--kont-->))
       (for*/set ([k (store-ref-kont σ a)])
         (let* ([b (alloc state k)]
                [new-k `(ar ,e1 ,ρ ,a)]
@@ -240,43 +261,44 @@
     [`((,v . ,l) ,ρ ,σ ,a ,t)
      (set-remove
       (for*/set ([k (store-ref-kont σ a)])
-        (let ([b-k (lambda () (alloc state k))])
-          (match k
-            [`(ar ,e ,ρ1 ,c)
-             `(,e ,ρ1 ,(store-set σ (b-k) `(fn (,v . ,l) ,ρ ,c)) ,(b-k) ,(tick state k))]
-            [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c)
-             (let ([b-v (alloc state k)])
-               `(,e ,(hash-set ρ1 x b-v) ,(store-set σ b-v (val->storable (cons v l) ρ σ)) ,c ,(tick state k)))]
-            [`(fn ((<--kont--> ,a1) . ,l1) ,ρ1 ,c)
-             `((,v . ,l) ,ρ ,σ ,a1 ,(tick state k))]
-            [`(fn (call/cc . ,l1) ,ρ1 ,c)
-             (match v
-               [`(lambda (,k) ,e) `(,e ,(hash-set ρ k c) ,σ ,c ,(tick state k))]
-               #;[`(<--kont--> ,k-a) `(((lambda (x) (,v x)) . ,l) ,ρ ,σ ,a ,(tick state k))] ;η-exapnsion
-               #;[`(<--kont--> ,k-a) `(((<--kont--> ,a) . NO-LABEL) ,ρ ,σ ,k-a ,(tick state k))] ; from paper
-               [`(<--kont--> ,k-a) `(((<--kont--> ,c) . NO-LABEL) ,ρ ,σ ,k-a ,(tick state k))] ; what I think is right
-               )]
-            [`(fn (,(? builtin? builtin) . ,l1) ,ρ1 ,c)
-             `((,(apply-builtin builtin v) . ,l1) ,ρ ,σ ,c ,(tick state k))]
-            [`(if ,then ,else ,(? env? ρ) ,(? addr? a))
-             (let ([cond-eval (if v #t #f)])  
-               `(,(if cond-eval then else) ,ρ ,σ ,a ,(tick state k)))]
-            [`(set ,(? addr? addr) ,(? addr? a))
-             (match (hash-ref σ addr)
-               [`(clo ,e ,ρ1)   `(,e ,ρ1                            ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))]
-               [`(const ,const) `(,const ,(hash)             ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))]
-               [(? kont?)       `(((<--kont--> ,addr) . ,l) ,(hash) ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))])]
-            [else '()])))
+        (match k
+          [`(ar ,e ,ρ1 ,c)
+           (let ([b-k (alloc state k)])
+             `(,e ,ρ1 ,(store-set σ b-k `(fn (,v . ,l) ,ρ ,c)) ,b-k ,(tick state k)))]
+          [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c)
+           (let ([b-v (alloc state k)])
+             `(,e ,(hash-set ρ1 x b-v) ,(store-set σ b-v (val->storable (cons v l) ρ σ)) ,c ,(tick state k)))]
+          [`(fn ((<--kont--> ,a1) . ,l1) ,ρ1 ,c)
+           `((,v . ,l) ,ρ ,σ ,a1 ,(tick state k))]
+          [`(fn (call/cc . ,l1) ,ρ1 ,c)
+           (match v
+             [`(lambda (,k1) ,e) `(,e ,(hash-set ρ k1 c) ,σ ,c ,(tick state k))]
+             #;[`(<--kont--> ,k-a) `(((lambda (x) (,v x)) . ,l) ,ρ ,σ ,a ,(tick state k))] ;η-exapnsion
+             #;[`(<--kont--> ,k-a) `(((<--kont--> ,a) . NO-LABEL) ,ρ ,σ ,k-a ,(tick state k))] ; from paper
+             [`(<--kont--> ,k-a) `(((<--kont--> ,c) . NO-LABEL) ,ρ ,σ ,k-a ,(tick state k))] ; what I think is right
+             )]
+          [`(fn (,(? builtin? builtin) . ,l1) ,ρ1 ,c)
+           `((,(apply-builtin builtin v) . ,l1) ,ρ ,σ ,c ,(tick state k))]
+          [`(if ,then ,else ,(? env? ρ) ,(? addr? a))
+           (let ([cond-eval (if v #t #f)])  
+             `(,(if cond-eval then else) ,ρ ,σ ,a ,(tick state k)))]
+          [`(set ,(? addr? addr) ,(? addr? a))
+           (match (hash-ref σ addr) ;TODO (hash-ref σ addr) is wrong?
+             [`(clo ,e ,ρ1)   `(,e ,ρ1                            ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))]
+             [`(const ,const) `(,const ,(hash)             ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))]
+             [(? kont?)       `(((<--kont--> ,addr) . ,l) ,(hash) ,(store-set σ addr (val->storable (cons v l) ρ σ)) ,a ,(tick state k))])]
+          [else '()]))
       '())]))
 
 (define (iterate state)
   (displayln "Iterating state...")
   (pretty-print state)
-  (let ([next-state (stream->list (step state))])
-    (if (equal? next-state '())
+  (let ([next-states (set->list (step state))])
+    (if (equal? next-states '())
         ;; Done
-        (displayln "Done w/ evaluation.")
-        (iterate (car next-state)))))
+        (displayln (format "Done w/ evaluation. value: ~a" (car state)))
+        ;; Otherwise
+        (iterate (car next-states)))))
 
 ;; Find all states reachable from state, generate a graph whose root
 ;; is state.
@@ -345,13 +367,12 @@
         (let ([input (tag (desugar input))])
           ;; Execute the expression
           (pretty-print (set-count (reachable (inject input))))
-          ;(pretty-print (gen-graph (inject input)))
           (display-to-file (graphify (gen-graph (inject input))) "graph.dot" #:exists 'truncate)
-          ;(iterate (inject (desugar input)))))
-    (repl)))))
+          #;(iterate (inject input)))))
+  (repl))
 
 ;; Examples
-(define id-id '((lambda (x) x) (lambda (x) x)))
+(define id-id '((lambda (x) x) (lambda (y) y)))
 (define omega '((lambda (x) (x x)) (lambda (x) (x x))))
 ;; This should not terminate
 (define sugared-example
@@ -363,7 +384,7 @@
    ((lambda (dummy) (f #f))
     (set! f (lambda (x) (f x)))))
  #f) 
-(define sugared-example-2 '(let* ([id (lambda (x) x)]) (id #t)))
+(define sugared-example-2 '(let* ([id (lambda (x) x)]) (id (id id))))
 (define sugared-example-3 '((lambda (x) (let* ([res #f]) res)) #t))
 (define example-4
   (let* ([counter 0]
@@ -412,10 +433,10 @@
 (define example-8 
   (let* ([u (lambda(x)(x x))]
          [i (lambda(y) y)]
-         [apply (lambda (x) (lambda (y) (x y)))]
+         [apply (lambda (f) (lambda (arg) (f arg)))]
          [dummy1 ((apply i) u)])
     ((apply u) i)))
 
-(repl)
+(repl) 
 
 
