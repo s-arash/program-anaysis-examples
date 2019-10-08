@@ -2,93 +2,7 @@
 
 (require data/gvector)
 
-;; The language
-(define (proto-expr? expr? e)
-  (match e
-    [(? symbol?) #t]
-    [`(,(? expr?) ,(? expr?)) #t]
-    [`(lambda (,x) ,(? expr?)) #t]
-    [`(if ,(? expr?) ,(? expr?) ,(? expr?)) #t]
-    [`(set! ,(? symbol?) ,(? expr?)) #t]
-    [(? const?) #t]
-    [else #f]))
-
-;;it's not just theory!
-(define (Y f) (λ (x) (f (Y f) x)))
-
-(define expr? (Y proto-expr?))
-
-(define (proto-sugared-expr? expr? e)
-  (match e
-    [(? ((curry proto-expr?) expr?)) #t]
-    [`(λ (,x) ,(? expr? e)) #t]
-    [`(let* ([,(? symbol? xs) ,(? expr? xes)]...) ,(? expr? e)) #t]
-    [else #f]))
-
-(define sugared-expr? (Y proto-sugared-expr?))
-
-(define (desugar e)
-  (match e
-    [(? symbol? sym) sym]
-    [`(,(? sugared-expr? f) ,(? sugared-expr? arg)) `(,(desugar f) ,(desugar arg))]
-    [`(lambda (,x) ,(? sugared-expr? e)) `(lambda (,x) ,(desugar e))]
-    [`(λ (,x) ,(? sugared-expr? e)) `(lambda (,x) ,(desugar e))]
-    [`(if ,(? sugared-expr? cond-e) ,(? sugared-expr? then-e) ,(? sugared-expr? else-e)) `(if ,(desugar cond-e) ,(desugar then-e) ,(desugar else-e))]
-    [`(set! ,(? symbol? x) ,(? sugared-expr? e)) `(set! ,x ,(desugar e))]
-    [(? const? c) c]
-    [(? builtin? builtin) builtin]
-    [`(let* ([,(? symbol? xs) ,(? sugared-expr? xes)]...) ,(? sugared-expr? e))
-     (foldr (λ (x xe e) `((lambda (,x) ,e) ,(desugar xe))) (desugar e) xs xes)]
-    [else #f]))
-
-(define (tag e)
-  (define (tag e counter)
-    (match e
-      [(? symbol? s) `((,s . ,counter) . ,(add1 counter))]
-      [`(,(? expr? l) ,(? expr? r))
-       (let* ([l-t (tag l (add1 counter))]
-              [r-t (tag r (cdr l-t))])
-         `(((,(car l-t) ,(car r-t)) . ,counter) . ,(cdr r-t)))]
-      [`(lambda (,x) ,(? expr? e))
-       (let ([et (tag e (add1 counter))])
-         `(((lambda (,x) ,(car et)) . ,counter) . ,(cdr et)))]
-      [`(if ,(? expr? e-cond) ,(? expr? e-then) ,(? expr? e-else))
-       (let* ([e-cond-t (tag e-cond (add1 counter))]
-              [e-then-t (tag e-then (cdr e-cond-t))]
-              [e-else-t (tag e-else (cdr e-then-t))])
-         `(((if ,(car e-cond-t) ,(car e-then-t) ,(car e-else-t)) . ,counter) . ,(cdr e-else-t)))]
-      [`(set! ,(? symbol? x) ,(? expr? e))
-       (let ([et (tag e (add1 counter))])
-         `(((set! ,x ,(car et)) . ,counter) . ,(cdr et)))]
-      [(? const? c) `((,c . ,counter) . ,(add1 counter))]
-      [else 'BAD-INPUT]))
-  (car (tag e 1)))
-
-(define (untag et)
-  (match (car et)
-    [(? symbol? x) x]
-    [`(,l-t  ,r-t) `(,(untag l-t) ,(untag r-t))]
-    [`(lambda (,x) ,e-t) `(lambda (,x) ,(untag e-t))]
-    [`(if ,e-cond-t ,e-then-t ,e-else-t) `(if ,(untag e-cond-t) ,(untag e-then-t) ,(untag e-else-t))]
-    [`(set! ,x-t ,e-t) `(set! ,(untag x-t) ,(untag e-t))]
-    [(? const? c) c]
-    [else 'BAD-INPUT]))
-
-(define (tagged-expr? et)
-  (define (helper e)
-    (match e
-      [(cons head tail) (and (helper head) (helper tail))]
-      [sym (not (equal? sym 'BAD-INPUT))]))
-  (helper (untag et)))
-
-(define (builtin? x) (hash-ref builtins x #f))
-(define const? (or/c boolean? number? builtin?))
-(define builtins (hash
-                  'add1 add1
-                  'sub1 sub1
-                  'not not
-                  'zero? zero?
-                  'call/cc 'call/cc))
+(require "lang-def.rkt")
 
 (define (env? e)
   (and (andmap (lambda (key) (symbol? key)) (hash-keys e))
@@ -124,16 +38,25 @@
     [`(,expr ,(? env?) ,(? store?) ,(? addr?) ,(? time?)) #t]
     [else #f]))
 
+(define (validate-state state)
+  (match state
+    [`(,expr ,env ,store ,addr ,time)
+    (begin
+      (when (not (env? env)) (error (format "not a valid env: ~v" env)))
+      (when (not (store? store)) (error (format "not a valid store: ~v" store)))
+      (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
+      (when (not (time? time)) (error (format "not a valid time: ~v" time))))]))
+
 (define (addr? a)
   (match a
-    ;[x #t] ; TODO REMOVE
+    [x #t] ; TODO REMOVE
     [`(,x . ,δ) (and (or (symbol? x) (number? x))
                     (andmap number? δ))]
     [else #f]))
 
 (define (time? t)
   (match t
-    ;[x #t] ; TODO REMOVE
+    [x #t] ; TODO REMOVE
     [`(,l . ,δ) (and (andmap number? δ)
                      (or (number? l) (equal? l '•)))]
     [else #f]))
@@ -160,23 +83,25 @@
        ['mt `(,l . ,δ)])])])
     (when (not (time? res)) (error (format "not a valid time: ~v \nstate: ~v \nkont:~a" res state kont)))
     res))
+
 ; My hackery...
 #;(define (tick state kont)
   (let ([res (match state
     [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) t]
-    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t) #:when (not (eq? e0 '<--kont-->)) (take-at-most (cons l t) k-cfa-k)]
-    [`(((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a ,t) (take-at-most (cons l t) k-cfa-k)]
+    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a (,s . ,δ)) #:when (not (eq? e0 '<--kont-->)) (cons (cons l s) δ)]
+    [`(((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
     [`(((set! ,x ,e) . ,l) ,ρ ,σ ,a ,t) t]
-    [`((,v . ,_) ,ρ ,σ ,a ,t)
+    [`((,v . ,_) ,ρ ,σ ,a (,l . ,δ))
      (match kont
-       [`(ar (,e . ,l1) ,ρ1 ,c) (take-at-most (cons l1 t) k-cfa-k)]
-       [`(fn ((lambda (,x) ,e) . ,l1) ,ρ1 ,c)      (take-at-most (cons l1 t) k-cfa-k)]
-       [`(fn ((<--kont--> ,a1) . ,l1) ,ρ1 ,c)      (take-at-most (cons l1 t) k-cfa-k)]
-       [`(fn (call/cc . ,l1) ,ρ1 ,c)               (take-at-most (cons l1 t) k-cfa-k)]
-       [`(fn (,(? builtin? builtin) . ,l1) ,ρ1 ,c) (take-at-most (cons l1 t) k-cfa-k)]
-       [`(if ,then ,else ,(? env? ρ) ,(? addr? a)) t]
-       [`(set ,(? addr? addr) ,(? addr? a)) t]
-       ['mt t])])])
+       [`(ar ,e ,ρ1 ,c) `(,l . ,δ)]
+       [`(fn (,fn . ,l1) ,ρ1 ,c)
+        (if (equal? l '())
+            (cons l (take-at-most δ k-cfa-k))  
+            (cons (cdr l) (take-at-most (cons (car l) δ) k-cfa-k)))]
+       
+       [`(if ,then ,else ,(? env? ρ) ,(? addr? a)) `(,l . ,δ)]
+       [`(set ,(? addr? addr) ,(? addr? a)) `(,l . ,δ)]
+       ['mt `(,l . ,δ)])])])
     (when (not (time? res)) (error (format "not a valid time: ~v \nstate: ~v \nkont:~a" res state kont)))
     res))
 
@@ -217,13 +142,7 @@
 
 ;; Step relation
 (define (step state)
-  (match state
-    [`(,expr ,env ,store ,addr ,time)
-    (begin
-      (when (not (env? env)) (error (format "not a valid env: ~v" env)))
-      (when (not (store? store)) (error (format "not a valid store: ~v" store)))
-      (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
-      (when (not (time? time)) (error (format "not a valid time: ~v" time))))])    
+  (validate-state state)    
   (when (not (state? state)) (pretty-print state) (error (format "not a valid state: ~v" state)) )
   (when (not (tagged-expr? (car state))) (error (format "not a tagged expr: ~v" (car state))))
   (match state
@@ -340,7 +259,7 @@
   (displayln "}" output)
   (get-output-string output))
 
-;; Finds all states reachable from state?
+;; Finds all states reachable from state
 (define (reachable state)
   (define ind 0)
   (define known-states (mutable-set state))
@@ -358,64 +277,19 @@
   known-states)
   
 (define (repl)
-  (displayln "Type an expression...")
+  (displayln (format "[k = ~a] Type an expression..." k-cfa-k))
   (display "> ")
   (let ([input (read)])
     ;; Execute the expression
     (if (not (sugared-expr? input))
         (displayln "NOT a valid expression.")
-        (let ([input (tag (desugar input))])
+        (let ([input (tag (desugar (a-normalize input)))])
           ;; Execute the expression
           (pretty-print (set-count (reachable (inject input))))
           (display-to-file (graphify (gen-graph (inject input))) "graph.dot" #:exists 'truncate)
           #;(iterate (inject input)))))
   (repl))
 
-;; Examples
-(define id-id '((lambda (x) x) (lambda (y) y)))
-(define omega '((lambda (x) (x x)) (lambda (x) (x x))))
-;; This should not terminate
-(define sugared-example
-  '(let* ([f #f]
-          [dummy (set! f (lambda (x) (f x)))])
-     (f #f)))
-; desugared:
-#;((lambda (f)
-   ((lambda (dummy) (f #f))
-    (set! f (lambda (x) (f x)))))
- #f) 
-(define sugared-example-2 '(let* ([id (lambda (x) x)]) (id (id id))))
-(define sugared-example-3 '((lambda (x) (let* ([res #f]) res)) #t))
-(define example-4
-  (let* ([counter 0]
-         [count-down #t]
-         [dummy (set! count-down (lambda (x) (if (zero? x) x (let* ([dummy3 (set! counter (add1 counter))]) (count-down (sub1 x))))))]
-         [dummy2 (count-down 5)]
-         [dummy3 (count-down 6)])
-    counter))
-(define example-5 (let* ([foo (call/cc (lambda (k) (let* ([dummy (k 6)]) 7)))])
-                    foo))
-(define example-6
-  (let* ([lbl (lambda (x) (call/cc (lambda (k) (k k))))]
-         [goto (lambda (lbl) (lbl lbl))]
-         [double (lambda (n)
-              (let* ([i n]
-                     [res 0]
-                     [start (lbl #f)]
-                     [dummy (set! res (add1 (add1 res)))]
-                     [dummy2 (set! i (sub1 i))]
-                     [dummy3 (if (zero? i) #f (goto start))])
-                res))])
-         (double 10)))
-
-(define exmaple-7
-  (let* ([i 0]
-         [lbl1 (call/cc (lambda (k) k))]
-         [dummy (set! i (add1 i))]
-         [where-will-it-go (call/cc lbl1)]
-         [dummy4 (call/cc where-will-it-go)]
-         ) 
-  i))
 (define example-viz
   (let* ([u (lambda(x)(x x))]
          [i (lambda(y) y)])
@@ -428,7 +302,6 @@
     (let* ([d #t]
           [e (lambda(r)(if r #f #t))])
       (((b c) e)(e d)))))
-(define example-omega '((lambda (x) (x x)) (lambda (y) (y y))))
 
 (define example-8 
   (let* ([u (lambda(x)(x x))]
@@ -438,5 +311,3 @@
     ((apply u) i)))
 
 (repl) 
-
-

@@ -144,8 +144,8 @@
          [`(fn call/cc ,ρ1 ,c)
           (match v
             [`(lambda (,k) ,e) `(,e ,(hash-set ρ k c) ,σ ,c)]
-            #;[`(<--kont--> ,k-a) `((lambda (x) (,v x)) ,ρ ,σ ,a)] ;η-exapnsion
-            [`(<--kont--> ,k-a) `((<--kont--> ,a) ,ρ ,σ ,k-a)] ; from paper
+            [`(<--kont--> ,k-a) `((lambda (x) (,v x)) ,ρ ,σ ,a)] ;η-exapnsion
+            #;[`(<--kont--> ,k-a) `((<--kont--> ,a) ,ρ ,σ ,k-a)] ; from paper
             #;[`(<--kont--> ,k-a) `((<--kont--> ,c) ,ρ ,σ ,k-a)] ; what I think is right
             )]
          [`(fn ,(? builtin? builtin) ,ρ1 ,c)
@@ -174,7 +174,9 @@
   (display "> ")
   (let ([input (read)])
     ;; Execute the expression
-    (iterate (inject (desugar input)))
+    (if (not (sugared-expr? input))
+        (displayln "NOT a valid expression.")
+        (iterate (inject (desugar input))))
     (repl)))
 
 (repl)
