@@ -45,7 +45,8 @@
       (when (not (env? env)) (error (format "not a valid env: ~v" env)))
       (when (not (store? store)) (error (format "not a valid store: ~v" store)))
       (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
-      (when (not (time? time)) (error (format "not a valid time: ~v" time))))]))
+      (when (not (time? time)) (error (format "not a valid time: ~v" time)))
+      (when (not (tagged-expr? (car state))) (error (format "not a tagged expr: ~v" (car state)))))]))
 
 (define (addr? a)
   (match a
@@ -142,9 +143,7 @@
 
 ;; Step relation
 (define (step state)
-  (validate-state state)    
-  (when (not (state? state)) (pretty-print state) (error (format "not a valid state: ~v" state)) )
-  (when (not (tagged-expr? (car state))) (error (format "not a tagged expr: ~v" (car state))))
+  (validate-state state)      
   (match state
     ;; Variable lookup
     [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) 
@@ -262,19 +261,58 @@
 ;; Finds all states reachable from state
 (define (reachable state)
   (define ind 0)
-  (define known-states (mutable-set state))
+  (define known-states (make-hash))
+  (hash-set! known-states state (mutable-set))
   (define states (gvector state))
   (define (loop)
     (define current (gvector-ref states ind))
     (for ([s (step current)])
-      (when (not (set-member? known-states s))
+      (set-add! (hash-ref known-states current) s)
+      (when (not (hash-has-key? known-states s))
           (begin
             (gvector-add! states s)
-            (set-add! known-states s))))
+            (hash-set! known-states s (mutable-set)))))
     (set! ind (+ ind 1))
     (when (< ind (gvector-count states)) (loop)))
   (loop)
   known-states)
+
+
+(define (with-store state store)
+  (match state
+    [`(,e ,ρ ,σ ,a ,t) `(,e ,ρ ,store ,a ,t)]))
+(define (combine-stores σ1 σ2)
+  (foldl (λ (key-val store) (hash-set store (car key-val) (set-union (hash-ref store (car key-val) (set)) (cdr key-val)))) σ1 (hash->list σ2)))
+
+(define (reachable-widened state)
+  (define store (third state))
+  (set! state (with-store state (hash)))
+  
+  (define ind 0)
+  (define known-states (make-hash))
+  (hash-set! known-states state (mutable-set))
+  (define states (gvector state))
+  (define (loop)
+    (define current (gvector-ref states ind))
+    (match-define `(,step-states . ,new-store) (store-widened-step current store))
+    (set! store new-store)
+    (for ([s step-states])
+      (set-add! (hash-ref known-states current) s)
+      (when (not (hash-has-key? known-states s))
+          (begin
+            (gvector-add! states s)
+            (hash-set! known-states s (mutable-set)))))
+    (set! ind (+ ind 1))
+    (when (< ind (gvector-count states)) (loop)))
+  (loop)
+  known-states)
+
+;; returns a pair of type (Set State, Store), where all states have an empty store
+(define (store-widened-step state store) 
+  (let* ([new-states (step (with-store state store))]
+         [new-store (foldl (λ (state store) (combine-stores (third state) store)) store (set->list new-states))]
+         [new-store-widened-states (set-map new-states (λ (state) (with-store state (hash))) )])
+    (cons new-store-widened-states new-store)))
   
 (define (repl)
   (displayln (format "[k = ~a] Type an expression..." k-cfa-k))
@@ -283,10 +321,12 @@
     ;; Execute the expression
     (if (not (sugared-expr? input))
         (displayln "NOT a valid expression.")
-        (let ([input (tag (desugar (a-normalize input)))])
-          ;; Execute the expression
-          (pretty-print (set-count (reachable (inject input))))
-          (display-to-file (graphify (gen-graph (inject input))) "graph.dot" #:exists 'truncate)
+        (let* ([input (tag (desugar (a-normalize input)))]
+              [graph-widened (reachable-widened (inject input))]
+              [graph (reachable (inject input))])
+          (displayln (format "states: ~a, widened-states: ~a" (hash-count graph) (hash-count graph-widened)))
+          (display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
+          (display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)
           #;(iterate (inject input)))))
   (repl))
 

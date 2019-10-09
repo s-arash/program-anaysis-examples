@@ -70,79 +70,12 @@
                                          (cons (append (car list-isbound) `([,var ,(replace-free val free-var replace-val)]))
                                                (equal? var free-var)))) (cons '() #f) vars vals)])
          `(let* ,(car new-vars-vals) ,(if (cdr new-vars-vals) e0 (replace-free e0 free-var replace-val))))]
-      [`(,(? expr? e0) ,(? expr? e1)) `(,(replace-free e0 free-var replace-val) ,(replace-free e1 free-var replace-val))]
-      [`(lambda (,x) ,(? expr? e0)) (if (equal? x free-var) e `(lambda (,x) ,(replace-free e0 free-var replace-val)))]
-      [`(if ,(? expr? e-cond) ,(? expr? e-then) ,(? expr? e-else))
+      [`(,(? sugared-expr? e0) ,(? sugared-expr? e1)) `(,(replace-free e0 free-var replace-val) ,(replace-free e1 free-var replace-val))]
+      [`(lambda (,x) ,(? sugared-expr? e0)) (if (equal? x free-var) e `(lambda (,x) ,(replace-free e0 free-var replace-val)))]
+      [`(if ,(? sugared-expr? e-cond) ,(? sugared-expr? e-then) ,(? sugared-expr? e-else))
        `(if ,(replace-free e-cond free-var replace-val) ,(replace-free e-then free-var replace-val) ,(replace-free e-else free-var replace-val))]
-      [`(set! ,(? symbol? x) ,(? expr? e0)) `(set! ,x ,(replace-free e0 free-var replace-val))]
+      [`(set! ,(? symbol? x) ,(? sugared-expr? e0)) `(set! ,x ,(replace-free e0 free-var replace-val))]
       [(? const? c) c]))
-
-(define (a-normalize-WRONG e)
-  (define i 0)
-  (define (fresh-id) (set! i (add1 i)) (string->symbol (format "__x~a" i)))
-  
- 
-  (define simplify
-    (iter-to-fp (λ (e)
-                  (match e
-                    [`(let* ([,vars1 ,vals1]...) (let* ([,vars2 ,vals2]...) ,e))
-                     `(let* ,(map (λ (var val) `[,var ,val]) (append vars1 vars2) (append vals1 vals2)) ,(simplify e))]
-                    [`(,(? expr? e0) ,(? expr? e1)) `(,(simplify e0) ,(simplify e1))]
-                    [`(lambda (,x) ,(? expr? e)) `(lambda (,x) ,(simplify e))]
-                    [`(if ,(? expr? e-cond) ,(? expr? e-then) ,(? expr? e-else)) `(if ,(simplify e-cond) ,(simplify e-then) ,(simplify e-else))]
-                    [`(set! ,(? symbol? x) ,(? expr? e)) `(set! ,x ,(simplify e))]
-                    [`(let* ,bindings ,e) `(let* ,bindings ,(simplify e))]
-                    [`(lambda (,x) ,e0) `(lambda (,x) ,(simplify e0))]
-                    [`(λ (,x) ,e0) `(λ (,x) ,(simplify e0))]
-                    [x x]))))
-  
-  (define remove-unnecessary-bindings
-    (iter-to-fp
-     (λ (e) (match e
-              [`(let* ([,vars ,vals]...) ,e0)
-               (let ([ind (index-where vals ae?)])
-                 (if (equal? ind #f)
-                     e
-                     (let* ([var (list-ref vars ind)]
-                            [val (list-ref vals ind)]
-                            [new-vars (remove-at vars ind)]
-                            [new-vals (remove-at vals ind)])
-                       (if (= (length new-vars) 0)
-                           (replace-free e0 var val)
-                           `(let* ,(map (λ (var val) `[,var ,val]) new-vars new-vals) ,(replace-free e0 var val))))))]
-              [e e]))))
-
-         
-
-  (define (a-normalize e)
-    (match e
-      [`(let* ([,vars ,vals]...) ,e0)
-          `(let* ,(map (λ (var val) `[,var ,(a-normalize val)]) vars vals) ,(a-normalize e0))]
-      [`(lambda (,x) ,e) `(lambda (,x) ,(a-normalize e))]
-      [(? symbol? x) x]
-      [`((lambda (,x) ,e) ,e1) #:when (not (ae? e1))
-                               (let ([id (fresh-id)])
-                                 `(let* ([,id ,(a-normalize e1)]) (lambda (,x) ,(a-normalize e)) ,id))]
-      [`((lambda (,x) ,e) ,e1) `((lambda (,x) ,(a-normalize e)) ,(a-normalize e1))]
-      [`(,(? symbol? x) ,e1) #:when (not (ae? e1))
-                            (let ([id (fresh-id)])
-                              `(let* ([,id ,(a-normalize e1)]) (,x ,id)))]
-      [`(,(? symbol? x) ,e) `(,x ,(a-normalize e))]
-      [`(,e1 ,e2) (let ([e1-id (fresh-id)]
-                        [e2-id (fresh-id)])
-                    (remove-unnecessary-bindings `(let* ([,e1-id ,(a-normalize e1)]
-                                                         [,e2-id ,(a-normalize e2)])
-                                                    (,e1-id ,e2-id))))]
-      [`(if ,e-cond ,e-then ,e-else)
-       (let ([id-cond (fresh-id)])
-         (remove-unnecessary-bindings `(let* ([,id-cond ,(a-normalize e-cond)])
-                                         (if ,id-cond ,(a-normalize e-then) ,(a-normalize e-else)))))]
-      [`(set! ,x ,e0)
-       (let ([id (fresh-id)])
-         (remove-unnecessary-bindings `(let* ([,id ,(a-normalize e0)]) (set! ,x ,id))))]
-      [(? const? c) c]))
-  (simplify (a-normalize e)))
-
 
 (define (a-normalize e)
   (define i 0)
@@ -153,16 +86,16 @@
     (iter-to-fp (λ (e)
                   (match e
                     [`(let* ([,vars1 ,vals1]...) (let* ([,vars2 ,vals2]...) ,e))
-                     `(let* ,(map (λ (var val) `[,var ,val]) (append vars1 vars2) (append vals1 vals2)) ,(simplify e))]
-                    [`(,(? expr? e0) ,(? expr? e1)) `(,(simplify e0) ,(simplify e1))]
-                    [`(lambda (,x) ,(? expr? e)) `(lambda (,x) ,(simplify e))]
-                    [`(if ,(? expr? e-cond) ,(? expr? e-then) ,(? expr? e-else)) `(if ,(simplify e-cond) ,(simplify e-then) ,(simplify e-else))]
-                    [`(set! ,(? symbol? x) ,(? expr? e)) `(set! ,x ,(simplify e))]
-                    [`(let* ,bindings ,e) `(let* ,bindings ,(simplify e))]
-                    [`(lambda (,x) ,e0) `(lambda (,x) ,(simplify e0))]
+                     `(let* ,(map (λ (var val) `[,var ,(simplify val)]) (append vars1 vars2) (append vals1 vals2)) ,(simplify e))]
+                    [`(,(? sugared-expr? e0) ,(? sugared-expr? e1)) `(,(simplify e0) ,(simplify e1))]
+                    [`(lambda (,x) ,(? sugared-expr? e0)) `(lambda (,x) ,(simplify e0))]
+                    [`(if ,(? sugared-expr? e-cond) ,(? sugared-expr? e-then) ,(? sugared-expr? e-else)) `(if ,(simplify e-cond) ,(simplify e-then) ,(simplify e-else))]
+                    [`(set! ,(? symbol? x) ,(? sugared-expr? e)) `(set! ,x ,(simplify e))]
+                    [`(let* ([,vars ,vals]...) ,e) `(let* ,(map (λ (var val) `[,var ,(simplify val)]) vars vals) ,(simplify e))]
                     [`(λ (,x) ,e0) `(λ (,x) ,(simplify e0))]
                     [x x]))))
-  
+
+  ;; this is WRONG in a language with set!
   (define remove-unnecessary-bindings
     (iter-to-fp
      (λ (e) (match e
@@ -179,25 +112,29 @@
                            `(let* ,(map (λ (var val) `[,var ,val]) new-vars new-vals) ,(replace-free e0 var val))))))]
               [e e]))))
 
-         
-  (define (expr->ae e k)
+  (define (atomic-application? e)
+    (match e
+      [`((? ae?) (? ae?)) #t]
+      [else #f]))
+  (define (expr->ae e k #:atomic-application-as-ae [application-ae #f])
     (match (a-normalize e)
       [(? ae? ae) (k ae)]
+      [`(,(? ae? ae0) ,(? ae? ae1)) #:when application-ae (k `(,ae0 ,ae1))] 
+      [`(let* ,bindings ,e0) #:when (or (ae? e0) (and application-ae (atomic-application? e0)))
+       `(let* ,bindings ,(k e0))]
       [`(let* ,bindings ,e0)
        (let ([e0-var (fresh-id)])
          `(let* (,@bindings [,e0-var ,e0])
             ,(k e0-var)))]
-      [`(let* ,bindings ,(? ae? ae0))
-       `(let* ,bindings ,(k ae0))]
       [e-norm (let ([e-var (fresh-id)])
-              `(let* ([,e-var ,e-norm]) ,(k e-var)))]))  
+                `(let* ([,e-var ,e-norm]) ,(k e-var)))]))  
   
   (define (a-normalize e)
     (match e
       [`(let* ([,vars ,vals]...) ,e0)
        (if (equal? vars '())
            (a-normalize e0)
-           (expr->ae (car vals)
+           (expr->ae #:atomic-application-as-ae #t (car vals)
                      (λ (val-ae)
                        `(let* ([,(car vars) ,val-ae]) ,(a-normalize `(let* ,(map (λ (var val) `[,var ,val]) (cdr vars) (cdr vals))
                                                                        ,e0))))))] 
