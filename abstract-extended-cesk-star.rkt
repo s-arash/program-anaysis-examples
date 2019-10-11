@@ -133,7 +133,7 @@
 
 ;; store utils
 (define (store-ref-val σ a)
-  (stream-filter clo? (hash-ref σ a)))
+  (stream-filter (not/c kont?) (hash-ref σ a)))
 
 (define (store-ref-kont σ a)
   (stream-filter kont? (hash-ref σ a)))
@@ -155,7 +155,7 @@
          [`(clo ,lam ,ρ1)
           `(,lam ,ρ1 ,σ ,a ,(tick state k))]
          [`(const ,v)
-          `(,v (hash) ,σ ,a ,(tick state k))]))]
+          `(,v ,(hash) ,σ ,a ,(tick state k))]))]
     ;; Application
     [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t) #:when (not (eq? e0 '<--kont-->))
       (for*/set ([k (store-ref-kont σ a)])
@@ -217,32 +217,6 @@
         (displayln (format "Done w/ evaluation. value: ~a" (car state)))
         ;; Otherwise
         (iterate (car next-states)))))
-
-;; Find all states reachable from state, generate a graph whose root
-;; is state.
-(define (gen-graph state)
-  ;; h is a hash from states -> set of states
-  ;; Idea: each iteration, we map the step function over the keys of `h` and add any newly-discovered states
-  (define (iterate-hash h)
-    (let* ([next-states (map (lambda (state) (cons state (step state))) (hash-keys h))]
-           [next-graph 
-            (foldl
-             (match-lambda** [((cons state next-states) h)
-                              (let* ([graph-after-connecting (hash-set h state (set-union (hash-ref h state) next-states))]
-                                     [graph-after-adding-states
-                                      (foldl (lambda (next-state h)
-                                               (if (hash-has-key? h next-state) h (hash-set h next-state (set))))
-                                             graph-after-connecting
-                                             (set->list next-states))])
-                                graph-after-adding-states)])
-             h
-             next-states)])
-      (if (equal? next-graph h)
-          ;; No more 
-          h
-          ;; Otherwise, keep going...
-          (iterate-hash next-graph))))
-  (iterate-hash (hash state (set))))
 
 ;; Convert a hash of the type e -> set(e) into a DOT digraph
 (define (graphify h)

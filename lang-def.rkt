@@ -27,7 +27,8 @@
 
 (define sugared-expr? (Y proto-sugared-expr?))
 
-(define (desugar e)
+(define/contract (desugar e)
+  (sugared-expr? . -> . expr?)
   (match e
     [(? symbol? sym) sym]
     [`(,(? sugared-expr? f) ,(? sugared-expr? arg)) `(,(desugar f) ,(desugar arg))]
@@ -152,6 +153,47 @@
 (define example-for-a-normalize
   (let* ([g ((identity identity) identity)])
     g))
+
+(define (cpsify e)
+  (define i 0)
+  (define (fresh-id) (set! i (add1 i)) (string->symbol (format "__k~a" i)))
+  (define (cpsify e)
+    (match e
+      [`(lambda (,x) ,e0)
+       (let ([k-id (fresh-id)]
+             [k′-id (fresh-id)])
+         `(lambda (,k-id) (,k-id (lambda (,k′-id) (lambda (,x) (,(cpsify e0) ,k′-id))))))] 
+      [`(,e0 ,e1)
+       (let ([k-id (fresh-id)]
+             [e0-k (fresh-id)]
+             [e1-k (fresh-id)])
+         `(lambda (,k-id) (,(cpsify e0) (lambda (,e0-k) (,(cpsify e1) (lambda (,e1-k) ((,e0-k ,k-id) ,e1-k)))))))]
+      [(? builtin? b)
+       (let ([k-id (fresh-id)]
+             [k′-id (fresh-id)]
+             [x-id (fresh-id)])
+         `(lambda (,k-id) (,k-id (lambda (,k′-id) (lambda (,x-id) (,k′-id (,b ,x-id)))))))]
+      [(? (or/c symbol? number? boolean?) x) (let ([k-id (fresh-id)]) `(lambda (,k-id) (,k-id ,x)))]
+      [`(if ,e-cond ,e-then ,e-else)
+       (let ([k-id (fresh-id)]
+             [e-cond-k (fresh-id)])
+         `(lambda (,k-id) (,(cpsify e-cond) (lambda (,e-cond-k) (if ,e-cond-k (,(cpsify e-then) ,k-id) (,(cpsify e-else) ,k-id))))) )]
+      [`(set! ,x ,e0)
+       (let ([k-id (fresh-id)]
+             [e0-k (fresh-id)])
+         `(lambda (,k-id) (,k-id (,(cpsify e0) (lambda (,e0-k) (set! ,x ,e0-k))))) )]))
+  (cpsify e))
+
+(define example-for-cpsify
+  (((((lambda (x) x) (lambda (y) y)) (lambda (x) (lambda (y) x))) 1) 2))
+
+(define example-for-cpsify-2
+  (((lambda (x) (lambda (y) (if x x y))) #f) 42))
+
+(define example-for-cpsify-3
+  ((lambda (x) ((lambda (dummy) x) (set! x (add1 x)))) 1))
+
+
     
 (define (tag e)
   (define (tag e counter)
@@ -193,7 +235,7 @@
       [sym (not (equal? sym 'BAD-INPUT))]))
   (helper (untag et)))
 
-(define (builtin? x) (hash-ref builtins x #f))
+(define (builtin? x) (hash-has-key? builtins x))
 (define const? (or/c boolean? number? builtin?))
 (define builtins (hash
                   'add1 add1
