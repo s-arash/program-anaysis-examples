@@ -66,9 +66,11 @@
   (if (<= (length l) n) l (take l n)))
 
 (define k-cfa-k 0)
+(define strategy-is-a-normalization #t)
+(define (transform-input e) (if strategy-is-a-normalization (a-normalize e) e))
 
 ; The paper's definition
-(define (tick state kont)
+(define (tick-a-normalized state kont)
   (let ([res (match state
     [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) t]
     [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a (,_ . ,δ)) #:when (not (eq? e0 '<--kont-->)) (cons l δ)]
@@ -86,11 +88,11 @@
     res))
 
 ; My hackery...
-#;(define (tick state kont)
+(define (tick-direct state kont)
   (let ([res (match state
     [`((,(? (and/c symbol? (not/c const?)) x) . ,l) ,ρ ,σ ,a ,t) t]
-    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a (,s . ,δ)) #:when (not (eq? e0 '<--kont-->)) (cons (cons l s) δ)]
-    [`(((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
+    [`(((,e0 ,e1) . ,l) ,ρ ,σ ,a (,ls . ,δ)) #:when (not (eq? e0 '<--kont-->)) (cons (cons l ls) δ)]
+    [`(((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a (,ls . ,δ)) (cons (cons l ls) δ)]
     [`(((set! ,x ,e) . ,l) ,ρ ,σ ,a ,t) t]
     [`((,v . ,_) ,ρ ,σ ,a (,l . ,δ))
      (match kont
@@ -105,6 +107,7 @@
        ['mt `(,l . ,δ)])])])
     (when (not (time? res)) (error (format "not a valid time: ~v \nstate: ~v \nkont:~a" res state kont)))
     res))
+(define (tick state kont) (if strategy-is-a-normalization (tick-a-normalized state kont) (tick-direct state kont)))
 
 ;; allocator for k-CFA
 (define (alloc state kont)
@@ -122,8 +125,9 @@
 
 ;; Create a CESK* state from e
 (define (inject e)
-  (let ([a0 '(0 . ())])
-    `(,e ,(hash) ,(hash a0 (set 'mt)) ,a0 (• . ()))))
+  (let ([a0 '(0 . ())]
+        [init-time (if strategy-is-a-normalization '(• . ()) '(() . ()))])
+    `(,e ,(hash) ,(hash a0 (set 'mt)) ,a0 ,init-time)))
 
 (define (val->storable v ρ σ)
   (match (car v)
@@ -255,6 +259,7 @@
 (define (with-store state store)
   (match state
     [`(,e ,ρ ,σ ,a ,t) `(,e ,ρ ,store ,a ,t)]))
+
 (define (combine-stores σ1 σ2)
   (foldl (λ (key-val store) (hash-set store (car key-val) (set-union (hash-ref store (car key-val) (set)) (cdr key-val)))) σ1 (hash->list σ2)))
 
@@ -287,21 +292,23 @@
          [new-store (foldl (λ (state store) (combine-stores (third state) store)) store (set->list new-states))]
          [new-store-widened-states (set-map new-states (λ (state) (with-store state (hash))) )])
     (cons new-store-widened-states new-store)))
-  
-(define (repl)
-  (displayln (format "[k = ~a] Type an expression..." k-cfa-k))
-  (display "> ")
-  (let ([input (read)])
-    ;; Execute the expression
-    (if (not (sugared-expr? input))
+
+(define (analyze input)
+  (if (not (sugared-expr? input))
         (displayln "NOT a valid expression.")
-        (let* ([input (tag (desugar (a-normalize input)))]
+        (let* ([input (tag (desugar (transform-input input)))]
               [graph-widened (reachable-widened (inject input))]
               [graph (reachable (inject input))])
           (displayln (format "states: ~a, widened-states: ~a" (hash-count graph) (hash-count graph-widened)))
           (display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
           (display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)
           #;(iterate (inject input)))))
+
+(define (repl)
+  (displayln (format "[k = ~a] Type an expression..." k-cfa-k))
+  (display "> ")
+  (let ([input (read)])
+    (analyze input))
   (repl))
 
 (define example-viz
@@ -324,4 +331,4 @@
          [dummy1 ((apply i) u)])
     ((apply u) i)))
 
-(repl) 
+;(repl) 
