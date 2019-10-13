@@ -296,9 +296,11 @@
 (define (analyze input)
   (if (not (sugared-expr? input))
         (displayln "NOT a valid expression.")
-        (let* ([input (tag (desugar (transform-input input)))]
-              [graph-widened (reachable-widened (inject input))]
-              [graph (reachable (inject input))])
+        (let* ([input (desugar (transform-input input))]
+               #;[input (tag input)]
+               [input (parse-tagged-expr (format "~a" input))] ;; testing the machinary with the parser
+               [graph-widened (reachable-widened (inject input))]
+               [graph (reachable (inject input))])
           (displayln (format "states: ~a, widened-states: ~a" (hash-count graph) (hash-count graph-widened)))
           (display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
           (display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)

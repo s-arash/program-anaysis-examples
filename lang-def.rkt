@@ -1,5 +1,9 @@
 #lang racket
 
+(require parser-tools/yacc
+         parser-tools/lex
+         (prefix-in : parser-tools/lex-sre))
+
 (provide (all-defined-out))
 
 ;; The language
@@ -40,6 +44,21 @@
     [(? builtin? builtin) builtin]
     [`(let* ([,(? symbol? xs) ,(? sugared-expr? xes)]...) ,(? sugared-expr? e))
      (foldr (λ (x xe e) `((lambda (,x) ,e) ,(desugar xe))) (desugar e) xs xes)]
+    [else #f]))
+
+(define (desugar-tagged e)
+  (define no-label 'NO-LABEL)
+  (match e
+    [`(,(? (or/c symbol? const?) sym) . ,l) `(,sym . ,l)]
+    [(? builtin? builtin) builtin]
+    [`((,f ,arg) . ,l) `((,(desugar-tagged f) ,(desugar-tagged arg)) . ,l)]
+    [`((lambda (,x) ,e) . ,l) `((lambda (,x) ,(desugar-tagged e)) . ,l)]
+    [`((λ (,x) ,e) . ,l) `((lambda (,x) ,(desugar-tagged e)) . ,l)]
+    [`((if ,cond-e ,then-e ,else-e) . ,l) `((if ,(desugar-tagged cond-e) ,(desugar-tagged then-e) ,(desugar-tagged else-e)) . ,l)]
+    [`((set! ,(? symbol? x) ,e0) . ,l) `((set! ,x ,(desugar-tagged e0)) . ,l)] 
+    [`((let* ([,(? symbol? xs) ,xes] ...) ,e0) . ,l)
+     (let ([res-no-label (foldr (λ (x xe e) `((((lambda (,x) ,e) . ,no-label) ,(desugar-tagged xe)) . ,no-label) ) (desugar-tagged e0) xs xes)])
+       `(,(car res-no-label) . ,l))]
     [else #f]))
 
 (define (remove-at lst ind)
@@ -224,7 +243,9 @@
     [`(,l-t  ,r-t) `(,(untag l-t) ,(untag r-t))]
     [`(lambda (,x) ,e-t) `(lambda (,x) ,(untag e-t))]
     [`(if ,e-cond-t ,e-then-t ,e-else-t) `(if ,(untag e-cond-t) ,(untag e-then-t) ,(untag e-else-t))]
-    [`(set! ,x-t ,e-t) `(set! ,(untag x-t) ,(untag e-t))]
+    [`(set! ,x-t ,e-t) `(set! ,x-t ,(untag e-t))]
+    [`(let* ([,vars ,vals] ...) ,e0t)
+     `(let* ,(map (λ (var val) `(,var ,(untag val))) vars vals) ,(untag e0t))]
     [(? const? c) c]
     [else 'BAD-INPUT]))
 
@@ -244,6 +265,53 @@
                   'zero? zero?
                   'call/cc 'call/cc))
 
+
+;; ----- Parsing --------
+
+(define-tokens value-tokens (SYMBOL))
+(define-empty-tokens empty-tokens (OP CP OB CB EOF))
+(define sexpl
+  (lexer-src-pos
+   [(eof) 'EOF]
+   [(:or #\tab #\space #\newline) (return-without-pos (sexpl input-port))]
+   [(:: (:? (char-set "#")) (:+ (:or alphabetic numeric (char-set "!$%&*/:<=>?^_~@+-.@")))) (token-SYMBOL (read (open-input-string lexeme)))]
+   ["(" 'OP]
+   [")" 'CP]
+   ["[" 'OB]
+   ["]" 'CB]))
+
+(define sexp
+  (parser
+   (tokens value-tokens empty-tokens)
+   (start sexp)
+   (end EOF)
+   (error (lambda (a b c) (void)))
+   (src-pos)
+   (grammar
+    (sexps [() '()]
+           [(sexp sexps) (cons $1 $2)])
+    (sexp [(OP sexps CP) (cons $2 (cons $1-start-pos $3-end-pos))]
+          [(OB sexps CB) (cons $2 (cons $1-start-pos $3-end-pos))]
+          [(SYMBOL) (cons $1 (cons $1-start-pos $1-end-pos))]))))
+
+(define (parse str)
+  (define port (open-input-string str))
+  (port-count-lines! port)
+  (sexp (λ () (sexpl port))))
+
+(define (shave-extra-tags e)
+  (match e
+    [`(((lambda . ,_) (((,x . ,_)) . ,_) ,e) . ,l) `((lambda (,x) ,(shave-extra-tags e)) . ,l)]
+    [`(((if . ,_) ,e-cond ,e-then ,e-else) . ,l) `((if ,(shave-extra-tags e-cond) ,(shave-extra-tags e-then) ,(shave-extra-tags e-else)) . ,l)]
+    [`(((set! . ,_) (,x . ,_) ,e) . ,l) `((set! ,x ,(shave-extra-tags e)) . ,l)]
+    [`((,e1 ,e2) . ,l) `((,(shave-extra-tags e1) ,(shave-extra-tags e2)) . ,l)]
+    [`(((let* . ,_) ((([,vars ,vals] . ,binding-ls) ...) . ,_) ,e) . ,l)
+     `((let* ,(map (λ (var val) `(,(car var) ,(shave-extra-tags val))) vars vals) ,(shave-extra-tags e)) . ,l)]
+    [x x]))
+
+(define/contract (parse-tagged-expr str)
+  (string? . -> . tagged-expr?)
+  (shave-extra-tags (parse str)))
 
 ;; Examples
 (define id-id '((lambda (x) x) (lambda (y) y)))
