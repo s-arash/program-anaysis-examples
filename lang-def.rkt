@@ -258,11 +258,12 @@
 
 (define (builtin? x) (hash-has-key? builtins x))
 (define const? (or/c boolean? number? builtin?))
+
 (define builtins (hash
-                  'add1 add1
-                  'sub1 sub1
+                  'add1 (λ (n) (if (number? n) (add1 n) #f))
+                  'sub1 (λ (n) (if (number? n) (sub1 n) #f))
                   'not not
-                  'zero? zero?
+                  'zero? (and/c number? zero?)
                   'call/cc 'call/cc))
 
 
@@ -351,7 +352,6 @@
          [lbl1 (call/cc (lambda (k) k))]
          [dummy (set! i (add1 i))]
          [where-will-it-go (call/cc lbl1)]
-         [dummy4 (call/cc where-will-it-go)]
-         ) 
-  i))
+         [dummy4 (call/cc where-will-it-go)]) 
+    i))
 
