@@ -80,6 +80,13 @@
       [`(λ (,x) ,e) #t]
       [else #f]))
 
+(define (tagged-ae? e)
+  (match e
+    [`((lambda (,x) ,e0) . ,_) #t]
+    [`(,(? symbol?) . ,_) #t]
+    [`(,(? (or/c boolean? number?)) . ,_) #t]
+    [else #f]))
+
 (define (replace-free e free-var replace-val)
     (match e
       [(? symbol? x) (if (equal? x free-var) replace-val x)]
@@ -115,26 +122,9 @@
                     [`(λ (,x) ,e0) `(λ (,x) ,(simplify e0))]
                     [x x]))))
 
-  ;; this is WRONG in a language with set!
-  (define remove-unnecessary-bindings
-    (iter-to-fp
-     (λ (e) (match e
-              [`(let* ([,vars ,vals]...) ,e0)
-               (let ([ind (index-where vals ae?)])
-                 (if (equal? ind #f)
-                     e
-                     (let* ([var (list-ref vars ind)]
-                            [val (list-ref vals ind)]
-                            [new-vars (remove-at vars ind)]
-                            [new-vals (remove-at vals ind)])
-                       (if (= (length new-vars) 0)
-                           (replace-free e0 var val)
-                           `(let* ,(map (λ (var val) `[,var ,val]) new-vars new-vals) ,(replace-free e0 var val))))))]
-              [e e]))))
-
   (define (atomic-application? e)
     (match e
-      [`((? ae?) (? ae?)) #t]
+      [`(,(? ae?) ,(? ae?)) #t]
       [else #f]))
   (define (expr->ae e k #:atomic-application-as-ae [application-ae #f])
     (match (a-normalize e)
@@ -169,13 +159,73 @@
       [(? const? c) c]))
   (simplify (a-normalize e)))
 
+
+
+(define (a-normalize-tagged e)
+  (define i 0)
+  (define (fresh-id [prefix "x"]) (set! i (add1 i)) (string->symbol (format "__~a~a" prefix i)))
+  
+  ;; Merges consecutive let*s together
+  (define simplify-tagged
+    (iter-to-fp (match-lambda [(cons e l0)
+                  (match e
+                    [`(let* ([,vars1 ,vals1]...) ((let* ([,vars2 ,vals2]...) ,e) . ,l1))
+                     `((let* ,(map (λ (var val) `[,var ,(simplify-tagged val)]) (append vars1 vars2) (append vals1 vals2)) ,(simplify-tagged e)) . ,l0)]
+                    [`(,(? tagged-expr? e0) ,(? tagged-expr? e1)) `((,(simplify-tagged e0) ,(simplify-tagged e1)) . ,l0)]
+                    [`(lambda (,x) ,(? tagged-expr? e0)) `((lambda (,x) ,(simplify-tagged e0)) . ,l0)]
+                    [`(if ,(? tagged-expr? e-cond) ,(? tagged-expr? e-then) ,(? tagged-expr? e-else))
+                     `((if ,(simplify-tagged e-cond) ,(simplify-tagged e-then) ,(simplify-tagged e-else)) . ,l0)]
+                    [`(set! ,(? symbol? x) ,(? tagged-expr? e)) `((set! ,x ,(simplify-tagged e)) . ,l0)]
+                    [`(let* ([,vars ,vals]...) ,e) `((let* ,(map (λ (var val) `[,var ,(simplify-tagged val)]) vars vals) ,(simplify-tagged e)) . ,l0)]
+                    [`(λ (,x) ,e0) `((λ (,x) ,(simplify-tagged e0)) . ,l0)]
+                    [x `(,x . ,l0)])])))
+
+  (define (tagged-atomic-application? e)
+    (match e
+      [`((,(? tagged-ae?) ,(? tagged-ae?)) . ,l) #t]
+      [else #f]))
+  (define (tagged-expr->ae te k #:atomic-application-as-ae [application-ae #f])
+    (unless (tagged-expr? te) (error "not a tagged expr: " te))
+    (match (a-normalize-tagged te)
+      [(? tagged-ae? ae) (k ae)]
+      [`((,(? tagged-ae? ae0) ,(? tagged-ae? ae1)) . ,l) #:when application-ae (k `((,ae0 ,ae1) . ,l))] 
+      [`((let* ,bindings ,e0) . ,l) #:when (or (tagged-ae? e0) (and application-ae (tagged-atomic-application? e0)))
+       `((let* ,bindings ,(k e0)) . ,l)]
+      [`((let* ,bindings ,e0) . ,l)
+       (let ([e0-var (fresh-id)])
+         `((let* (,@bindings [,e0-var ,e0])
+            ,(k `(,e0-var . NO-LABEL))) . ,l))]
+      [`(,e-norm . ,l) (let ([e-var (fresh-id)])
+                `((let* ([,e-var (,e-norm . ,l)]) ,(k `(,e-var . NO-LABEL))) . No-LABEL))]))  
+  
+  (define (a-normalize-tagged te)
+    (match te
+      [`((let* ([,vars ,vals]...) ,e0) . ,l)
+       (if (equal? vars '())
+           (a-normalize-tagged e0)
+           (tagged-expr->ae #:atomic-application-as-ae #t (car vals)
+                            (λ (val-ae)
+                              `((let* ([,(car vars) ,val-ae])
+                                 ,(a-normalize-tagged `((let* ,(map (λ (var val) `[,var ,val]) (cdr vars) (cdr vals))
+                                                          ,e0) . ,l))) . NO-LABEL))))] 
+      [`((lambda (,x) ,e) . ,l) `((lambda (,x) ,(a-normalize-tagged e)) . ,l)]
+      [(? tagged-ae? ae) ae]
+      [`((,e0 ,e1) . ,l) (tagged-expr->ae e0 (λ (ae0) (tagged-expr->ae e1 (λ (ae1) `((,ae0 ,ae1) . ,l)))))]
+
+      [`((if ,e-cond ,e-then ,e-else) .,l)
+       (tagged-expr->ae e-cond (λ (ae-cond) `((if ,ae-cond ,(a-normalize-tagged e-then) ,(a-normalize-tagged e-else)) . ,l)))]
+      [`((set! ,x ,e0) . ,l)
+       (tagged-expr->ae e0 (λ (e0-var) `((set! ,x ,e0-var) . ,l)))]
+      [`(,(? const? c) . ,l) `(,c . ,l)]))
+  (simplify-tagged (a-normalize-tagged e)))
+
 (define example-for-a-normalize
   (let* ([g ((identity identity) identity)])
     g))
 
 (define (cpsify e)
   (define i 0)
-  (define (fresh-id) (set! i (add1 i)) (string->symbol (format "__k~a" i)))
+  (define (fresh-id [prefix "k"]) (set! i (add1 i)) (string->symbol (format "__~a~a" prefix i)))
   (define (cpsify e)
     (match e
       [`(lambda (,x) ,e0)
@@ -184,22 +234,22 @@
          `(lambda (,k-id) (,k-id (lambda (,k′-id) (lambda (,x) (,(cpsify e0) ,k′-id))))))] 
       [`(,e0 ,e1)
        (let ([k-id (fresh-id)]
-             [e0-k (fresh-id)]
-             [e1-k (fresh-id)])
+             [e0-k (fresh-id "f")]
+             [e1-k (fresh-id "x")])
          `(lambda (,k-id) (,(cpsify e0) (lambda (,e0-k) (,(cpsify e1) (lambda (,e1-k) ((,e0-k ,k-id) ,e1-k)))))))]
       [(? builtin? b)
        (let ([k-id (fresh-id)]
              [k′-id (fresh-id)]
-             [x-id (fresh-id)])
+             [x-id (fresh-id "x")])
          `(lambda (,k-id) (,k-id (lambda (,k′-id) (lambda (,x-id) (,k′-id (,b ,x-id)))))))]
       [(? (or/c symbol? number? boolean?) x) (let ([k-id (fresh-id)]) `(lambda (,k-id) (,k-id ,x)))]
       [`(if ,e-cond ,e-then ,e-else)
        (let ([k-id (fresh-id)]
-             [e-cond-k (fresh-id)])
+             [e-cond-k (fresh-id "cond")])
          `(lambda (,k-id) (,(cpsify e-cond) (lambda (,e-cond-k) (if ,e-cond-k (,(cpsify e-then) ,k-id) (,(cpsify e-else) ,k-id))))) )]
       [`(set! ,x ,e0)
        (let ([k-id (fresh-id)]
-             [e0-k (fresh-id)])
+             [e0-k (fresh-id "x")])
          `(lambda (,k-id) (,k-id (,(cpsify e0) (lambda (,e0-k) (set! ,x ,e0-k))))) )]))
   (cpsify e))
 
@@ -218,23 +268,30 @@
   (define (tag e counter)
     (match e
       [(? symbol? s) `((,s . ,counter) . ,(add1 counter))]
-      [`(,(? expr? l) ,(? expr? r))
+      [`(,(? sugared-expr? l) ,(? sugared-expr? r))
        (let* ([l-t (tag l (add1 counter))]
               [r-t (tag r (cdr l-t))])
          `(((,(car l-t) ,(car r-t)) . ,counter) . ,(cdr r-t)))]
-      [`(lambda (,x) ,(? expr? e))
+      [`(lambda (,x) ,(? sugared-expr? e))
        (let ([et (tag e (add1 counter))])
          `(((lambda (,x) ,(car et)) . ,counter) . ,(cdr et)))]
-      [`(if ,(? expr? e-cond) ,(? expr? e-then) ,(? expr? e-else))
+      [`(if ,(? sugared-expr? e-cond) ,(? sugared-expr? e-then) ,(? sugared-expr? e-else))
        (let* ([e-cond-t (tag e-cond (add1 counter))]
               [e-then-t (tag e-then (cdr e-cond-t))]
               [e-else-t (tag e-else (cdr e-then-t))])
          `(((if ,(car e-cond-t) ,(car e-then-t) ,(car e-else-t)) . ,counter) . ,(cdr e-else-t)))]
-      [`(set! ,(? symbol? x) ,(? expr? e))
+      [`(set! ,(? symbol? x) ,(? sugared-expr? e))
        (let ([et (tag e (add1 counter))])
          `(((set! ,x ,(car et)) . ,counter) . ,(cdr et)))]
+      [`(let* ([,vars ,vals] ...) ,e0)
+       (let* ([vals-tagged (foldl (λ (val list-counter)
+                                   (match-let ([(cons new-val-tagged new-counter) (tag val (cdr list-counter))])
+                                     (cons (append (car list-counter) (list new-val-tagged)) new-counter)))
+                                 (cons '() (add1 counter)) vals)]
+              [e0-t (tag e0 (cdr vals-tagged))])
+         `(((let* ,(map (λ (var val) `[,var ,val]) vars (car vals-tagged)) ,(car e0-t)) . ,counter) . ,(cdr e0-t)))]
       [(? const? c) `((,c . ,counter) . ,(add1 counter))]
-      [else 'BAD-INPUT]))
+      #;[else 'BAD-INPUT]))
   (car (tag e 1)))
 
 (define (untag et)
@@ -246,15 +303,11 @@
     [`(set! ,x-t ,e-t) `(set! ,x-t ,(untag e-t))]
     [`(let* ([,vars ,vals] ...) ,e0t)
      `(let* ,(map (λ (var val) `(,var ,(untag val))) vars vals) ,(untag e0t))]
-    [(? const? c) c]
-    [else 'BAD-INPUT]))
+    [(? const? c) c]))
 
 (define (tagged-expr? et)
-  (define (helper e)
-    (match e
-      [(cons head tail) (and (helper head) (helper tail))]
-      [sym (not (equal? sym 'BAD-INPUT))]))
-  (helper (untag et)))
+  (with-handlers ([exn? (λ (ex) #f)])
+    (begin (untag et) #t)))
 
 (define (builtin? x) (hash-has-key? builtins x))
 (define const? (or/c boolean? number? builtin?))

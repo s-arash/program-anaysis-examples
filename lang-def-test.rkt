@@ -5,6 +5,9 @@
 
 (define test-cases 
   '(
+    (let* ([i (lambda (x) x)]
+           [u (lambda (y)(y y))]) (i #t))
+     
     ((let* ([u (lambda(x)(x x))]
          [i (lambda(y) y)]
          [apply (lambda (f) (lambda (arg) (f arg)))]
@@ -60,9 +63,19 @@
  (for-each
   (λ (item)
     (let ([e (desugar item)])
-      (check-equal? (untag (tag e)) e)))
+      (check-equal? (untag (tag e)) e)
+      (check-equal? (untag (tag item)) item)))
   test-cases))
 
+;; testing a-normalize-tagged
+(test-begin
+  (for-each
+   (λ (item)
+     (let* ([item-tagged (tag item)]
+            [_ (pretty-print item)]
+            [_ (pretty-print (untag (a-normalize-tagged (tag item))))])
+       (check-equal? (untag (a-normalize-tagged (tag item))) (a-normalize item))))
+   test-cases))
 
 ;; checking parser and untag
 (test-begin

@@ -21,7 +21,3 @@
 
 (define (set-filter f s)
   (list->set (filter f (set->list s))))
-
-(define/contract xxxx
-  (setof number?)
-  (set 1 2 3 4 ))

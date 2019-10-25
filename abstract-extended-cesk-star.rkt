@@ -1,49 +1,13 @@
 #lang racket
 
 (require data/gvector)
+(require json)
+(require "viz-tool-output.rkt")
+(require "abstract-extended-cesk-star-helpers.rkt")
 (require "lang-def.rkt")
 (require "util.rkt")
 
 (provide (all-defined-out))
-
-(define (env? e)
-  (and (andmap symbol? (hash-keys e))
-       (andmap addr? (hash-values e))))
-
-(define (kont? k)
-  (match k
-    ['mt #t]
-    [`(ar ,(? tagged-expr? arg) ,(? env? env) ,(? addr? k)) #t]
-    [`(fn ,(? val? f) ,(? addr? k)) #t]
-    [`(if ,(? tagged-expr? then) ,(? tagged-expr? else) ,(? env? env) ,(? addr? k)) #t]
-    [`(set ,(? addr? addr) ,(? addr? k)) #t]
-    [else #f]))
-
-(define (val? v)
-  (match v
-    [`(builtin ,b) #t]
-    [`(kont ,k) #t]
-    [`(lit ,l) #t]
-    [`(clo ((lambda (,x) ,(? tagged-expr?)) . ,l) ,(? env?)) #t]
-    [else #f]))
-
-(define (store? e)
-  #t
-  #;(and (andmap addr? (hash-keys e))
-       (andmap (lambda (v) (andmap (or/c val? kont?) (set->list v))) (hash-values e))))
-
-(define (state? state)
-  (match state
-    [`(E ,expr ,(? env?) ,(? store?) ,(? addr?) ,(? time?)) #t]
-    [`(T ,(? val?) ,(? store?) ,(? addr?) ,(? time?)) #t]
-    [else #f]))
-
-(define (tagged-ae? e)
-  (match e
-    [`((lambda (,x) ,e0) . ,_) #t]
-    [`(,(? symbol?) . ,_) #t]
-    [`(,(? (or/c boolean? number?)) . ,_) #t]
-    [else #f]))
 
 (define/contract (ae->vals ae ρ σ)
   (tagged-ae? env? store? . -> . (set/c val?))
@@ -57,42 +21,13 @@
            `(kont ,(hash-ref ρ x))
            v))]))
 
-(define (validate-state state)
-  (match state
-    [`(E ,expr ,env ,store ,addr ,time)
-    (begin
-      (when (not (env? env)) (error (format "not a valid env: ~v" env)))
-      (when (not (store? store)) (error (format "not a valid store: ~v" store)))
-      (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
-      (when (not (time? time)) (error (format "not a valid time: ~v" time)))
-      (when (not (tagged-expr? expr)) (error (format "not a tagged expr: ~v" (car state)))))]
-    [`(T ,v ,store ,addr ,time)
-    (begin
-      (when (not (store? store)) (error (format "not a valid store: ~v" store)))
-      (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
-      (when (not (time? time)) (error (format "not a valid time: ~v" time))))]))
-
-(define (addr? a)
-  (match a
-    [x #t] ; TODO REMOVE
-    [`(,x . ,δ) (and (or (symbol? x) (number? x))
-                    (andmap number? δ))]
-    [else #f]))
-
-(define (time? t)
-  (match t
-    [x #t] ; TODO REMOVE
-    [`(,l . ,δ) (and (andmap number? δ)
-                     (or (number? l) (equal? l '•)))]
-    [else #f]))
-
 (define (take-at-most l n)
   (if (<= (length l) n) l (take l n)))
 
-(define k-cfa-k 1000)
+(define k-cfa-k 1)
 (define (set-k-cfa-k k) (set! k-cfa-k k))
 
-(define strategy-is-a-normalization #t)
+(define strategy-is-a-normalization #f)
 (define (transform-input e) (if strategy-is-a-normalization (a-normalize e) e))
 
 ; The paper's definition
@@ -154,6 +89,14 @@
        [`(fn (clo ((lambda (,x) ,e) . ,l1) ,ρ1) ,c) (cons (cons x l1) δ)]
        [`(if (,then . ,then-l) (,else . ,else-l) ,(? env? ρ) ,(? addr? a)) (cons (if (val-truthy v) then-l else-l) δ)])]))
 
+;; the old kont allocator
+#;(define (alloc-k state kont target-expr target-env)
+  (alloc state kont))
+
+;; p4f kont allocator
+(define (alloc-k state kont target-expr target-env)
+  (cons target-expr target-env))
+
 (define (apply-builtin builtin v)
   ((hash-ref builtins builtin) v))
 
@@ -186,29 +129,29 @@
     ;; Application
     [`(E ((,e0 ,e1) . ,l) ,ρ ,σ ,a ,t)
       (for*/set ([k (store-ref-kont σ a)])
-        (let* ([b (alloc state k)]
+        (let* ([kb (alloc-k state k e0 ρ)]
                [new-k `(ar ,e1 ,ρ ,a)]
-               [new-σ (store-set σ b new-k)])
-          `(E ,e0 ,ρ ,new-σ ,b ,(tick state k))))]
+               [new-σ (store-set σ kb new-k)])
+          `(E ,e0 ,ρ ,new-σ ,kb ,(tick state k))))]
     ;; if expression
     [`(E ((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a ,t)
      (for*/set ([k (store-ref-kont σ a)])
-       (let* ([b (alloc state k)]
+       (let* ([kb (alloc-k state k e-cond ρ)]
               [new-k `(if ,e-then ,e-else ,ρ ,a)])
-         `(E ,e-cond ,ρ ,(store-set σ b new-k) ,b ,(tick state k))))]
+         `(E ,e-cond ,ρ ,(store-set σ kb new-k) ,kb ,(tick state k))))]
     ;; set!
     [`(E ((set! ,x ,e) . ,l) ,ρ ,σ ,a ,t)
      (for*/set ([k (store-ref-kont σ a)])
-       (let ([b (alloc state k)]
+       (let ([kb (alloc-k state k e ρ)]
              [new-kont `(set ,(hash-ref ρ x) ,a)])
-         `(E ,e ,ρ ,(store-set σ b new-kont) ,b ,(tick state k))))]
+         `(E ,e ,ρ ,(store-set σ kb new-kont) ,kb ,(tick state k))))]
     ;; Lambdas and constants...
     [`(T ,v ,σ ,a ,t)
      (set-remove
       (for*/set ([k (store-ref-kont σ a)])
         (match k
           [`(ar ,e ,ρ1 ,c)
-           (let ([b-k (alloc state k)])
+           (let ([b-k (alloc-k state k e ρ1)])
              `(E ,e ,ρ1 ,(store-set σ b-k `(fn ,v ,c)) ,b-k ,(tick state k)))]
           [`(fn (clo ((lambda (,x) ,e) . ,l1) ,ρ1) ,c)
            (let ([b-v (alloc state k)])
@@ -229,12 +172,7 @@
            (let ([cond-eval (match v ['(lit #f) #f] [else #t])])  
              `(E ,(if cond-eval then else) ,ρ ,σ ,a ,(tick state k)))]
           [`(set ,(? addr? addr) ,(? addr? a))
-            ;; TODO: How does mutation in AAM work? we just *add* the new value to the address of the variable in the store?
-           (let ([σ′ (if (= 1 (set-count (hash-ref σ addr)))
-                         (hash-set σ addr (set v))
-                         ;; what now?
-                         (store-set σ addr v))])
-               `(T (lit #f) ,σ′ ,a ,(tick state k)))]
+           `(T (lit #f) ,(store-set σ addr v) ,a ,(tick state k))]
           [else '()]))
       '())]))
 
@@ -319,7 +257,7 @@
     (set! ind (+ ind 1))
     (when (< ind (gvector-count states)) (loop)))
   (loop)
-  known-states)
+  (list known-states store))
 
 ;; returns a value of type (Set State, Store), where all states have an empty store
 (define (store-widened-step state store) 
@@ -328,19 +266,23 @@
          [new-store-widened-states (for/set ([state new-states]) (with-store state (hash)))])
     (cons new-store-widened-states new-store)))
 
-(define (analyze input)
-  (if (not (sugared-expr? input))
-        (displayln "NOT a valid expression.")
-        (let* ([input (desugar (transform-input input))]
-               #;[input (tag input)]
-               [input (parse-tagged-expr (~a input))] ;; testing the machinary with the parser
-               [graph-widened (reachable-widened (inject input))]
-               [dummy (displayln (format "widened-states: ~a" (hash-count graph-widened)))]
-               [graph (reachable (inject input))])
-          (displayln (format "states: ~a" (hash-count graph)))
-          (display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
-          #;(display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)
-          #;(iterate (inject input)))))
+(define (analyze input-str)
+  (unless (sugared-expr? (read (open-input-string input-str)))
+    (displayln "NOT a valid expression."))
+  (match-let*
+      ([input-parsed (parse-tagged-expr input-str)]
+       [input-parsed-processed (transform-input input-parsed)] 
+       [input-parsed-processed (desugar-tagged input-parsed-processed)]
+       [s0 (inject input-parsed-processed)]
+       [(list graph-widened store-widened) (reachable-widened s0)]
+       #;[graph (reachable (inject input-desugared))])
+    (displayln (format "widened-states: ~a" (hash-count graph-widened)))
+    #;(displayln (format "states: ~a" (hash-count graph)))
+    #;(display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
+    (display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)
+    (display-to-file (jsexpr->string (jsonify input-str input-parsed (with-store s0 (hash)) graph-widened store-widened
+                                              #:analysis (format "~a-cfa" k-cfa-k)))
+                     "aam-vis-arash-test.json" #:exists 'truncate)))
 
 (define (repl)
   (displayln (format "[k = ~a] Type an expression..." k-cfa-k))
@@ -370,24 +312,7 @@
     ((apply u) i)))
 
 ;(repl) 
-#;(analyze '(let* ([lbl (lambda (x) (call/cc (lambda (k) k)))]
-         [goto (lambda (clbl) (clbl clbl))]
-         [double (lambda (n)
-              (let* ([i n]
-                     [res 0]
-                     [start (lbl #f)]
-                     [dummy (set! res (add1 (add1 res)))]
-                     [dummy2 (set! i (sub1 i))]
-                     [dummy3 (if (zero? i) #f (goto start))])
-                res))])
-         (double 5)))
-
-(analyze '(let* ([lbl (lambda (x) (call/cc (lambda (k) k)))]
-           [goto (lambda (clbl) (clbl clbl))]
-           [count (lambda (n)
-                    (let* ([i n]
-                           [start (lbl #f)]
-                           [dummy2 (set! i (sub1 i))]
-                           [dummy3 (if (zero? i) #f (goto start))])
-                      i))])
-      (count 2)))
+(analyze
+ "(let* ([u (lambda(x)(x x))]
+         [i (lambda(y) y)])
+    ((i i) u))")
