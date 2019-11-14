@@ -61,11 +61,6 @@
        `(,(car res-no-label) . ,l))]
     [else #f]))
 
-(define (remove-at lst ind)
-  (match ind
-    [0 (cdr lst)]
-    [_ (cons (car lst) (remove-at (cdr lst) (- ind 1)))]))
-
 (define (iter-to-fp f) (λ (e)
   (let ([e′ (f e)])
     (if (equal? e e′)
@@ -86,23 +81,6 @@
     [`(,(? symbol?) . ,_) #t]
     [`(,(? (or/c boolean? number?)) . ,_) #t]
     [else #f]))
-
-(define (replace-free e free-var replace-val)
-    (match e
-      [(? symbol? x) (if (equal? x free-var) replace-val x)]
-      [`(let* ([,vars ,vals]...) ,e0)
-       (let ([new-vars-vals (foldl (λ (var val list-isbound)
-                                     (if (cdr list-isbound)
-                                         (cons (append (car list-isbound) `([,var ,val])) #t)
-                                         (cons (append (car list-isbound) `([,var ,(replace-free val free-var replace-val)]))
-                                               (equal? var free-var)))) (cons '() #f) vars vals)])
-         `(let* ,(car new-vars-vals) ,(if (cdr new-vars-vals) e0 (replace-free e0 free-var replace-val))))]
-      [`(,(? sugared-expr? e0) ,(? sugared-expr? e1)) `(,(replace-free e0 free-var replace-val) ,(replace-free e1 free-var replace-val))]
-      [`(lambda (,x) ,(? sugared-expr? e0)) (if (equal? x free-var) e `(lambda (,x) ,(replace-free e0 free-var replace-val)))]
-      [`(if ,(? sugared-expr? e-cond) ,(? sugared-expr? e-then) ,(? sugared-expr? e-else))
-       `(if ,(replace-free e-cond free-var replace-val) ,(replace-free e-then free-var replace-val) ,(replace-free e-else free-var replace-val))]
-      [`(set! ,(? symbol? x) ,(? sugared-expr? e0)) `(set! ,x ,(replace-free e0 free-var replace-val))]
-      [(? const? c) c]))
 
 (define (a-normalize e)
   (define i 0)
@@ -299,6 +277,7 @@
     [(? symbol? x) x]
     [`(,l-t  ,r-t) `(,(untag l-t) ,(untag r-t))]
     [`(lambda (,x) ,e-t) `(lambda (,x) ,(untag e-t))]
+    [`(λ (,x) ,e-t) `(λ (,x) ,(untag e-t))]
     [`(if ,e-cond-t ,e-then-t ,e-else-t) `(if ,(untag e-cond-t) ,(untag e-then-t) ,(untag e-else-t))]
     [`(set! ,x-t ,e-t) `(set! ,x-t ,(untag e-t))]
     [`(let* ([,vars ,vals] ...) ,e0t)
@@ -319,6 +298,43 @@
                   'zero? (and/c number? zero?)
                   'call/cc 'call/cc))
 
+(define (replace-free e free-var replace-val)
+    (match e
+      [(? symbol? x) (if (equal? x free-var) replace-val x)]
+      [`(let* ([,vars ,vals]...) ,e0)
+       (let ([new-vars-vals (foldl (λ (var val list-isbound)
+                                     (if (cdr list-isbound)
+                                         (cons (append (car list-isbound) `([,var ,val])) #t)
+                                         (cons (append (car list-isbound) `([,var ,(replace-free val free-var replace-val)]))
+                                               (equal? var free-var)))) (cons '() #f) vars vals)])
+         `(let* ,(car new-vars-vals) ,(if (cdr new-vars-vals) e0 (replace-free e0 free-var replace-val))))]
+      [`(,(? sugared-expr? e0) ,(? sugared-expr? e1)) `(,(replace-free e0 free-var replace-val) ,(replace-free e1 free-var replace-val))]
+      [`(lambda (,x) ,(? sugared-expr? e0)) (if (equal? x free-var) e `(lambda (,x) ,(replace-free e0 free-var replace-val)))]
+      [`(if ,(? sugared-expr? e-cond) ,(? sugared-expr? e-then) ,(? sugared-expr? e-else))
+       `(if ,(replace-free e-cond free-var replace-val) ,(replace-free e-then free-var replace-val) ,(replace-free e-else free-var replace-val))]
+      [`(set! ,(? symbol? x) ,(? sugared-expr? e0)) `(set! ,x ,(replace-free e0 free-var replace-val))]
+      [(? const? c) c]))
+
+(define/contract (free-vars e)
+  (tagged-expr? . -> . (listof symbol?))
+
+  (define (free-vars e bound-vars)
+    (match e
+      [`(,(? const?) . ,l) '()]
+      [`(,(? symbol? x) . ,l) (if (set-member? bound-vars x) '() (list x))]
+      [`((lambda (,x) ,e) . ,l) (free-vars e (set-add bound-vars x))]
+      [`((if ,e-cond ,e-then ,e-else) . ,l) (append (free-vars e-cond bound-vars) (free-vars e-then bound-vars) (free-vars e-else bound-vars))]
+      [`((set! ,x ,e0) . ,l) (free-vars e0 bound-vars)]
+      [`((,e0 ,e1) . ,l) (append (free-vars e0 bound-vars) (free-vars e1 bound-vars))]
+      [`((λ (,x) ,e) . ,l) (free-vars e (set-add bound-vars x))]
+      [`((let* ([,(? symbol? xs) ,xes]...) ,e-body) . ,l)
+       (match-let ([(cons bound-vars free-vars0) (foldl (match-lambda** [(x xe (cons bound-vars res)) (cons (set-add bound-vars x)
+                                                                                                            (append res (free-vars xe bound-vars)))])
+                                                        (cons bound-vars '())
+                                                        xs xes)])
+         (append free-vars0 (free-vars e-body bound-vars)))]))
+  
+  (free-vars e (set)))
 
 ;; ----- Parsing --------
 
@@ -367,6 +383,8 @@
   (string? . -> . tagged-expr?)
   (shave-extra-tags (parse str)))
 
+
+
 ;; Examples
 (define id-id '((lambda (x) x) (lambda (y) y)))
 (define example-omega '((lambda (x) (x x)) (lambda (y) (y y))))
@@ -408,3 +426,11 @@
          [dummy4 (call/cc where-will-it-go)]) 
     i))
 
+(define example-8
+  (let* ([id (lambda (x) x)]
+         [f (lambda (n)
+              (let* ([_ (set! n (add1 n))])
+                n))]
+         [c (id #t)]
+         [d (id #f)])
+         (if d (f 1) (f 2))))

@@ -67,13 +67,34 @@
       (check-equal? (untag (tag item)) item)))
   test-cases))
 
+;; testing free-vars
+(test-begin
+  (for-each
+   (λ (item)
+     (let* ([item-tagged (tag item)])
+       (check-equal? (free-vars item-tagged) '())))
+   test-cases)
+
+  (check-equal? (free-vars (tag '(let* ([lbl (lambda (x) (call/cc (lambda (k) (_k k))))]
+                                        [goto (lambda (lbl) (lbl lbl))]
+                                        [double (lambda (n)
+                                                  (let* ([i _n]
+                                                         [res 0]
+                                                         [start (_lbl #f)]
+                                                         [dummy (set! res (add1 (add1 res)))]
+                                                         [dummy2 (set! i (sub1 _i))]
+                                                         [dummy3 (if (zero? i) #f (_goto start))])
+                                                    res))])
+                                   (double 10))))
+                '(_k _n _lbl _i _goto)))
+
 ;; testing a-normalize-tagged
 (test-begin
   (for-each
    (λ (item)
      (let* ([item-tagged (tag item)]
-            [_ (pretty-print item)]
-            [_ (pretty-print (untag (a-normalize-tagged (tag item))))])
+            #;[_ (pretty-print item)]
+            #;[_ (pretty-print (untag (a-normalize-tagged (tag item))))])
        (check-equal? (untag (a-normalize-tagged (tag item))) (a-normalize item))))
    test-cases))
 

@@ -21,3 +21,22 @@
 
 (define (set-filter f s)
   (list->set (filter f (set->list s))))
+
+(define (nullable predicate)
+  (λ (x)
+    (match x
+      ['null #t]
+      [else (predicate x)])))
+
+(define (take-at-most l n)
+  (if (<= (length l) n) l (take l n)))
+
+(define (remove-at lst ind)
+  (match ind
+    [0 (cdr lst)]
+    [_ (cons (car lst) (remove-at (cdr lst) (- ind 1)))]))
+
+(define (hash-filter-keys filter h)
+  (foldl (λ (k res) (if (filter k) (hash-set res k (hash-ref h k)) res))
+         (hash)
+         (hash-keys h)))
