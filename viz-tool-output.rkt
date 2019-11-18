@@ -66,8 +66,8 @@
 (define (jsonify expr-str tagged-expr s0 g σ #:analysis [analysis-type ""])
   (define state-ids (make-ids (hash-keys g)))
   (define env-ids (make-ids (map third (filter (λ (ς) (equal? (car ς) 'E)) (hash-keys g)))))
-  (define val-ids (make-ids (flatten (map set->list (hash-values σ)))))
-  (define kont-ids (make-ids (filter kont? (flatten (map set->list (hash-values σ))))))
+  (define val-ids (make-ids (flatten (map set->list (store-values σ)))))
+  (define kont-ids (make-ids (filter kont? (flatten (map set->list (store-values σ))))))
   (match-define (cons ast-json expr-pos-ids) (ast-json&expr-pos-ids tagged-expr))
 
   (define vals-json
@@ -90,7 +90,7 @@
   (define store-json
     (foldl (λ (addr h)
              (hash-set h (string->symbol (~a addr))
-                       (map (λ (val) (hash-ref val-ids val "????")) (set->list (hash-ref σ addr)))))
+                       (map (λ (val) (hash-ref val-ids val "????")) (set->list (store-ref σ addr)))))
            (hash) (hash-keys σ)))
 
   (define konts-json

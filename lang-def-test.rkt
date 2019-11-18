@@ -108,3 +108,19 @@
        (untag (parse-tagged-expr e-string))
        e)))
   test-cases))
+
+;; testting var-mutated?
+(test-begin
+ (check-equal? (var-mutated? 'x
+                             (tag '(lambda (x) (set! x 42))))
+               #f)
+ (check-equal? (var-mutated? 'x
+                             (tag '(let* ([i (lambda (x) x)]
+                                     [u (lambda (y)(y y))]
+                                     [_ (set! x 42)]) (i #t))))
+               #t)
+ (check-equal? (var-mutated? 'x
+                             (tag '(let* ([i (lambda (x) (set! x 42))]
+                                          [u (lambda (y)(y y))]) (i #t))))
+               #f))
+                             

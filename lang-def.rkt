@@ -324,7 +324,7 @@
       [`(,(? symbol? x) . ,l) (if (set-member? bound-vars x) '() (list x))]
       [`((lambda (,x) ,e) . ,l) (free-vars e (set-add bound-vars x))]
       [`((if ,e-cond ,e-then ,e-else) . ,l) (append (free-vars e-cond bound-vars) (free-vars e-then bound-vars) (free-vars e-else bound-vars))]
-      [`((set! ,x ,e0) . ,l) (free-vars e0 bound-vars)]
+      [`((set! ,x ,e0) . ,l) (append (if (set-member? bound-vars x) '() (list x)) (free-vars e0 bound-vars))]
       [`((,e0 ,e1) . ,l) (append (free-vars e0 bound-vars) (free-vars e1 bound-vars))]
       [`((λ (,x) ,e) . ,l) (free-vars e (set-add bound-vars x))]
       [`((let* ([,(? symbol? xs) ,xes]...) ,e-body) . ,l)
@@ -336,6 +336,23 @@
   
   (free-vars e (set)))
 
+;; returns true iff (a free occurence of) x is mutated inside expression e
+(define/contract (var-mutated? x e)
+  (symbol? tagged-expr? . -> . boolean?)
+  (match e
+      [`(,(? const?) . ,l) #f]
+      [`(,(? symbol? x) . ,l) #f]
+      [`((lambda (,x0) ,e0) . ,l) (if (equal? x0 x) #f (var-mutated? x e0))]
+      [`((if ,e-cond ,e-then ,e-else) . ,l) (or (var-mutated? x e-cond) (var-mutated? x e-then) (var-mutated? x e-else))]
+      [`((set! ,x0 ,e0) . ,l) (if (equal? x0 x) #t (var-mutated? x e0))]
+      [`((,e0 ,e1) . ,l) (or (var-mutated? x e0) (var-mutated? x e1))]
+      [`((λ (,x0) ,e0) . ,l) (if (equal? x0 x) #f (var-mutated? x e0))]
+      [`((let* ([,(? symbol? xs) ,xes]...) ,e-body) . ,l)
+       (if (equal? xs '())
+           (var-mutated? x e-body)
+           (or (var-mutated? x (car xes))
+               (and (not (equal? x (car xs))) (var-mutated? x `((let* ,(map (λ (xi xei) `[,xi ,xei]) (cdr xs) (cdr xes)) ,e-body) . ,l)))))
+       ]))
 ;; ----- Parsing --------
 
 (define-tokens value-tokens (SYMBOL))

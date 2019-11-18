@@ -4,6 +4,7 @@
 (require "util.rkt")
 (require "lang-def.rkt")
 (require data/gvector)
+
 (define (env? e)
   (and (andmap symbol? (hash-keys e))
        (andmap addr? (hash-values e))))
@@ -43,7 +44,8 @@
 (define (store? e)
   #t
   #;(and (andmap addr? (hash-keys e))
-       (andmap (lambda (v) (andmap (or/c val? kont?) (set->list v))) (hash-values e))))
+         (andmap (lambda (v) (and (store-count? (car v))
+                                  (andmap (or/c val? kont?) (set->list (cdr v))))) (hash-values e))))
 
 (define (addr? a)
   (match a
@@ -68,6 +70,53 @@
 (define/contract (state-kont state)
   (state? . -> . addr?)
   (if (equal? (car state) 'E) (fifth state) (fourth state)))
+
+
+;; store utils
+
+(define (store-ref σ a)
+  (cdr (hash-ref σ a)))
+
+(define (store-ref-val σ a)
+  (stream-filter (not/c kont?) (store-ref σ a)))
+
+(define (store-ref-kont σ a)
+  (stream-filter kont? (store-ref σ a)))
+
+(define (store-values σ)
+  (map cdr (hash-values σ)))
+(define (store-count? x)
+  (match x
+    [0 #t]
+    [1 #t]
+    ['∞ #t]))
+
+(define (store-count-add x y)
+  (match x
+    [0 y]
+    [1 (match y [0 1] [_ '∞])]
+    [_ '∞]))
+
+(define (store-count-add1 x)
+  (store-count-add x 1))
+
+(define (store-set σ a v)
+  (let ([store-entry (hash-ref σ a (cons 0 (set)))])
+    (hash-set σ a (cons (store-count-add1 (car store-entry)) (set-add (cdr store-entry) v)))))
+
+(define (store-update σ a v)
+  (let ([store-entry (hash-ref σ a (cons 0 (set)))])
+    (if (and (<= (set-count (cdr store-entry)) 1) (not (equal? (car store-entry) '∞)))
+        (hash-set σ a (cons '1 (set v)))
+        (store-set σ a v))))
+
+(define/contract (combine-stores σ1 σ2)
+  (store? store? . -> . store?)
+  (foldl (λ (key-val store)
+           (let ([store-entry (hash-ref store (car key-val) (cons 0 (set)))])
+             (hash-set store (car key-val) (cons (store-count-add (car store-entry) (car (cdr key-val)))
+                                                 (set-union (cdr store-entry) (cdr (cdr key-val)))))))
+         σ1 (hash->list σ2)))
 
 (define/contract (with-store state store)
   (state? store? . -> . state?)
@@ -96,25 +145,28 @@
       (when (not (addr? addr)) (error (format "not a valid addr: ~v" addr)))
       (when (not (time? time)) (error (format "not a valid time: ~v" time))))]))
 
-(define (kont->reachable-addrs k state)
+
+;; Garbage Collection
+(define/contract (kont->reachable-addrs k state)
+  (kont? state? . -> . any/c)
   (define σ (store-of state))
   (match k
     ['mt
      (set)]
-    [`(ar ,(? tagged-expr? arg) ,(? env? env) ,(? addr? k))
-     (set-add (expr-env->reachable-addrs arg env state) k)]
-    [`(fn ,(? val? f) ,(? addr? k))
-     (set-add (val->reachable-addrs f state) k)]
-    [`(if ,(? tagged-expr? then) ,(? tagged-expr? else) ,(? env? env) ,(? addr? k))
-     (set-union (expr-env->reachable-addrs then env state) (expr-env->reachable-addrs else env state) (set k))]
-    [`(set ,(? addr? addr) ,(? addr? k))
-     (set addr k)]))
+    [`(ar ,(? tagged-expr? arg) ,(? env? env) ,(? addr? ka))
+     (set-add (expr-env->reachable-addrs arg env state) ka)]
+    [`(fn ,(? val? f) ,(? addr? ka))
+     (set-add (val->reachable-addrs f state) ka)]
+    [`(if ,(? tagged-expr? then) ,(? tagged-expr? else) ,(? env? env) ,(? addr? ka))
+     (set-union (expr-env->reachable-addrs then env state) (expr-env->reachable-addrs else env state) (set ka))]
+    [`(set ,(? addr? addr) ,(? addr? ka))
+     (set addr ka)]))
 
 (define (val->reachable-addrs v state)
   (define σ (store-of state))
   (match v
     [`(builtin ,b) (set)]
-    [`(kont ,k) (kont->reachable-addrs k state)]
+    [`(kont ,ka) (set-add (addr->reachable-addrs ka state) ka)]
     [`(lit ,l) (set)]
     [`(clo ((lambda (,x) ,e) . ,l) ,env) (expr-env->reachable-addrs e env state #:ignore (list x))]))
 
@@ -125,7 +177,7 @@
                               [(? val?)  ( val->reachable-addrs stored state)])])
              (set-union res new-addrs)))
          (set)
-         (set->list (hash-ref (store-of state) a))))
+         (set->list (store-ref (store-of state) a))))
                                 
 (define (expr-env->reachable-addrs expr env state #:ignore [ignore '()])
   (define free (free-vars expr))
@@ -134,7 +186,6 @@
 
 ;; Returns all alive addresses of the state as a hash of the form addr -> set addr
 (define (all-alive-addrs state)
-  (validate-state state)
   (define roots (match state
                   [`(E ,e ,ρ ,(? store?) ,k ,(? time?)) (set-add (expr-env->reachable-addrs e ρ state) k)]
                   [`(T ,v ,(? store?) ,k ,(? time?)) (set-add (val->reachable-addrs v state) k)]))
@@ -143,6 +194,12 @@
 (define/contract (gc state)
   (state? . -> . state?)
   (define alive-addrs (all-alive-addrs state))
+  (define σ′ (hash-filter-keys (λ (a) (hash-has-key? alive-addrs a)) (store-of state)))
+  (with-store state σ′))
+
+(define/contract (gc-hybrid state global-store)
+  (state? store? . -> . state?)
+  (define alive-addrs (all-alive-addrs (with-store state (combine-stores global-store (store-of state)))))
   (define σ′ (hash-filter-keys (λ (a) (hash-has-key? alive-addrs a)) (store-of state)))
   (with-store state σ′))
 

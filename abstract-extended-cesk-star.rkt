@@ -16,7 +16,7 @@
     [`(,(? builtin? b) . ,_) (set `(builtin ,b))]
     [`(,(? (or/c boolean? number?) lit) . ,_) (set `(lit ,lit))]
     [`(,(? symbol? x) . ,_)
-     (for/set ([v (hash-ref σ (hash-ref ρ x))])
+     (for/set ([v (store-ref σ (hash-ref ρ x))])
        (if (kont? v)
            `(kont ,(hash-ref ρ x))
            v))]))
@@ -48,7 +48,7 @@
 (define/contract (tick-direct state kont)
   (state? (nullable kont?) . -> . time?)
   (let ([res (match state
-    [`(E ,(? tagged-ae?) ,ρ ,σ ,a (,l . ,δ)) #;`(,l . ,δ) `(,l . ,(if (empty? δ) δ (cdr δ)))]
+    [`(E ,(? tagged-ae?) ,ρ ,σ ,a (,l . ,δ)) `(,l . ,δ)]
     [`(E ((,e0 ,e1) . ,l) ,ρ ,σ ,a (,ls . ,δ)) (cons (cons l ls) δ)]
     [`(E ((if ,e-cond ,e-then ,e-else) . ,l) ,ρ ,σ ,a (,ls . ,δ)) (cons (cons l ls) δ)]
     [`(E ((set! ,x ,e) . ,l) ,ρ ,σ ,a (,ls . ,δ)) (cons (cons l ls) δ)]
@@ -72,19 +72,35 @@
     ['(lit #f) #f]
     [else #t]))
 
+(define (local-addr? addr)
+  (match addr
+    [`(LOCAL . ,_) #t]
+    [_ #f]))
+
+(define (alloc-on-local-state? state kont)
+  (match state
+    [`(T ,v ,σ ,a ,t)
+     (match kont
+       [`(fn (clo ((lambda (,x) ,e) . ,l1) ,ρ1) ,c) (var-mutated? x e)]
+       [_ #f])]
+    [_ #f]))
+
 ;; allocator for k-CFA
 (define/contract (alloc state kont)
   (state? kont? . -> . addr?)
-  #;(gensym)
-  (match state
-    [`(E (((,e0 . ,l) ,e1) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
-    [`(E ((if (,e-cond . ,e-cond-l) ,e-then ,e-else) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons e-cond-l δ)]
-    [`(E ((set! ,_ (,e0 . ,l)) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
-    [`(T ,v ,σ ,a (,_ . ,δ))
-     (match kont
-       [`(ar (,e . ,l1) ,ρ1 ,c) (cons l1 δ)]
-       [`(fn (clo ((lambda (,x) ,e) . ,l1) ,ρ1) ,c) (cons (cons x l1) δ)]
-       [`(if (,then . ,then-l) (,else . ,else-l) ,(? env? ρ) ,(? addr? a)) (cons (if (val-truthy v) then-l else-l) δ)])]))
+  (let ([addr
+         (match state
+           [`(E (((,e0 . ,l) ,e1) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
+           [`(E ((if (,e-cond . ,e-cond-l) ,e-then ,e-else) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons e-cond-l δ)]
+           [`(E ((set! ,_ (,e0 . ,l)) . ,l1) ,ρ ,σ ,a (,_ . ,δ)) (cons l δ)]
+           [`(T ,v ,σ ,a (,_ . ,δ))
+            (match kont
+              [`(ar (,e . ,l1) ,ρ1 ,c) (cons l1 δ)]
+              [`(fn (clo ((lambda (,x) ,e) . ,l1) ,ρ1) ,c) (cons (cons x l1) δ)]
+              [`(if (,then . ,then-l) (,else . ,else-l) ,(? env? ρ) ,(? addr? a)) (cons (if (val-truthy v) then-l else-l) δ)])])])
+    (if (alloc-on-local-state? state kont)
+        (cons 'LOCAL addr)
+        addr)))
 
 ;; the old kont allocator
 #;(define (alloc-k state kont target-expr target-env)
@@ -92,7 +108,10 @@
 
 ;; p4f kont allocator
 (define (alloc-k state kont target-expr target-env)
-  (cons target-expr target-env))
+  (let ([addr (cons target-expr target-env)])
+    (if (alloc-on-local-state? state kont)
+        (cons 'LOCAL addr)
+        addr)))
 
 (define (apply-builtin builtin v)
   ((hash-ref builtins builtin) v))
@@ -102,17 +121,7 @@
   (tagged-expr? . -> . state?)
   (let ([a0 '(0 . ())]
         [init-time (if strategy-is-a-normalization '(• . ()) '(() . ()))])
-    `(E ,e ,(hash) ,(hash a0 (set 'mt)) ,a0 ,init-time)))
-
-;; store utils
-(define (store-ref-val σ a)
-  (stream-filter (not/c kont?) (hash-ref σ a)))
-
-(define (store-ref-kont σ a)
-  (stream-filter kont? (hash-ref σ a)))
-
-(define (store-set σ a v)
-  (hash-set σ a (set-add (hash-ref σ a set) v)))
+    `(E ,e ,(hash) ,(store-set (hash) a0 'mt) ,a0 ,init-time)))
 
 ;; Step relation
 (define/contract (step-0 state)
@@ -179,12 +188,12 @@
            (let ([cond-eval (match v ['(lit #f) #f] [else #t])])  
              `(E ,(if cond-eval then else) ,ρ ,σ ,a ,(tick state k)))]
           [`(set ,(? addr? addr) ,(? addr? a))
-           `(T (lit #f) ,(store-set σ addr v) ,a ,(tick state k))]
+           `(T (lit #f) ,(store-update σ addr v) ,a ,(tick state k))]
           [else '()]))
       '())]))
 
 
-(define gc-switch #f)
+(define gc-switch #t)
 (define (set-gc-switch s) (set! gc-switch s))
 
 (define (step state)
@@ -225,6 +234,8 @@
   (define states (gvector state))
   (define (loop)
     (define current (gvector-ref states ind))
+    ;(println "-------------")
+    ;(println current)
     (for ([s (step current)])
       (set-add! (hash-ref known-states current) s)
       (when (not (hash-has-key? known-states s))
@@ -236,22 +247,18 @@
   (loop)
   known-states)
 
-(define (combine-stores σ1 σ2)
-  (foldl (λ (key-val store) (hash-set store (car key-val) (set-union (hash-ref store (car key-val) (set)) (cdr key-val)))) σ1 (hash->list σ2)))
-
-(define/contract (reachable-widened state)
-  (state? . -> . any/c)
-  (define store (store-of state))
-  (set! state (with-store state (hash)))
-  
+;; gets an initial state and a global store, computes the graph of reachable states
+(define/contract (reachable-widened state global-store)
+  (state? store? . -> . any/c)
+   
   (define ind 0)
   (define known-states (make-hash))
   (hash-set! known-states state (mutable-set))
   (define states (gvector state))
   (define (loop)
     (define current (gvector-ref states ind))
-    (match-define `(,step-states . ,new-store) (store-widened-step current store))
-    (set! store new-store)
+    (match-define `(,step-states . ,new-store) (store-widened-step current global-store))
+    (set! global-store new-store)
     (for/set ([s step-states])
       (set-add! (hash-ref known-states current) s)
       (when (not (hash-has-key? known-states s))
@@ -259,16 +266,20 @@
             (gvector-add! states s)
             (hash-set! known-states s (mutable-set)))))
     (set! ind (+ ind 1))
+    (when (= (remainder ind 1000) 0) (displayln (format "~a/~a" ind (gvector-count states))))
     (when (< ind (gvector-count states)) (loop)))
   (loop)
-  (list known-states store))
+  (list known-states global-store))
 
-;; returns a value of type (Set State, Store), where all states have an empty store
-(define (store-widened-step state store) 
-  (let* ([new-states (step (with-store state store))]
-         [new-store (foldl (λ (state store) (combine-stores (store-of state) store)) store (set->list new-states))]
-         [new-store-widened-states (for/set ([state new-states]) (with-store state (hash)))])
-    (cons new-store-widened-states new-store)))
+;; returns a value of type (Set State, Store), where the global store is factored out by addr-global?
+(define/contract (store-widened-step state global-store)
+  (state? store? . -> . (cons/c (set/c state?) store?))
+  (let* ([combined-store (combine-stores (store-of state) global-store)]
+         [new-states (step-0 (with-store state combined-store))]
+         [new-global-store (foldl (λ (state store) (combine-stores (hash-filter-keys (not/c local-addr?) (store-of state)) store)) global-store (set->list new-states))]
+         [new-store-widened-states (for/set ([state new-states])  
+                                     (gc-hybrid (with-store state (hash-filter-keys local-addr? (store-of state))) new-global-store))])
+    (cons new-store-widened-states new-global-store)))
 
 (define (analyze input-str)
   (unless (sugared-expr? (read (open-input-string input-str)))
@@ -278,13 +289,13 @@
        [input-parsed-processed (transform-input-tagged input-parsed)] 
        [input-parsed-processed (desugar-tagged input-parsed-processed)]
        [s0 (inject input-parsed-processed)]
-       [(list graph-widened store-widened) (reachable-widened s0)]
+       [(list graph-widened store-widened) (reachable-widened s0 (hash))]
+       [_ (displayln (format "widened-states: ~a" (hash-count graph-widened)))]
        [graph (reachable s0)])
-    (displayln (format "widened-states: ~a" (hash-count graph-widened)))
     (displayln (format "states: ~a" (hash-count graph)))
     #;(display-to-file (graphify graph) "graph.dot" #:exists 'truncate)
     (display-to-file (graphify graph-widened) "graph-widened.dot" #:exists 'truncate)
-    (display-to-file (jsexpr->string (jsonify input-str input-parsed (with-store s0 (hash)) graph-widened store-widened
+    #;(display-to-file (jsexpr->string (jsonify input-str input-parsed (with-store s0 (hash)) graph-widened store-widened
                                               #:analysis (format "~a-cfa" k-cfa-k)))
                      "aam-vis-arash-test.json" #:exists 'truncate)))
 
@@ -308,19 +319,23 @@
           [e (lambda(r)(if r #f #t))])
       (((b c) e)(e d)))))
 
-(define example-8 
+(define example-11 
   (let* ([u (lambda(x)(x x))]
          [i (lambda(y) y)]
          [apply (lambda (f) (lambda (arg) (f arg)))]
          [dummy1 ((apply i) u)])
     ((apply u) i)))
 
-(define example-9
+(define example-12
   '(let* ([u (lambda (x)(x x))]
          [i (lambda (y) y)])
     (((u i) u) (u (i u)))))
 ;(repl) 
-(analyze
- "(let* ([u (lambda (x)(x x))]
-         [i (lambda (y) y)])
-    (((u i) u) (u (i u))))")
+
+#;(analyze "(let* ([id (lambda (x) x)]
+         [f (lambda (n)
+              (let* ([_ (set! n (add1 n))])
+                n))]
+         [c (id #t)]
+         [d (id #f)])
+         (if d (f 1) (f 11)))")
